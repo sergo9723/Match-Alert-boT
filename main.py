@@ -12,5 +12,5 @@ dp = Dispatcher(bot)
 async def start_command(message: types.Message):
     await message.answer("Бот работает ✅")
 
-if name == "main":
+if __name__ == "__main__":
     executor.start_polling(dp, skip_updates=True)
