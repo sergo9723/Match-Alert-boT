@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+xauusd_signal_system/.env
+xauusd_signal_system/signals_log.jsonl
