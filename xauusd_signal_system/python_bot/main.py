@@ -3,9 +3,10 @@
 Полностью Python-бот сигналов по золоту — без TradingView и без вебхука.
 
 Цикл: раз в POLL_SECONDS секунд тянем H4/H1/M15 свечи из выбранного
-источника (yfinance — без регистрации, или OANDA demo — брокерские данные),
-прогоняем через strategy.XAUStrategy (прямой порт Pine-логики), и если
-появился новый сетап — просим Claude сверить его на согласованность
+источника (Yahoo Finance chart API — без регистрации, или OANDA demo —
+брокерские данные), прогоняем через strategy.XAUStrategy (прямой порт
+Pine-логики, чистый Python без numpy/pandas — работает на любом CPU), и
+если появился новый сетап — просим Claude сверить его на согласованность
 (ai_filter.ask_claude) и, если подтверждено, шлём в Telegram.
 
 Запуск:
@@ -33,8 +34,8 @@ from utils import log_signal
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 log = logging.getLogger("xau_signal_bot")
 
-DATA_SOURCE = os.environ.get("DATA_SOURCE", "yfinance")
-YFINANCE_TICKER = os.environ.get("YFINANCE_TICKER", "GC=F")
+DATA_SOURCE = os.environ.get("DATA_SOURCE", "yahoo")
+CHART_TICKER = os.environ.get("CHART_TICKER", "GC=F")
 OANDA_API_KEY = os.environ.get("OANDA_API_KEY", "")
 OANDA_INSTRUMENT = os.environ.get("OANDA_INSTRUMENT", "XAU_USD")
 OANDA_ENVIRONMENT = os.environ.get("OANDA_ENVIRONMENT", "practice")
@@ -76,7 +77,7 @@ def main():
 
     source = build_data_source(
         DATA_SOURCE,
-        yfinance_ticker=YFINANCE_TICKER,
+        yfinance_ticker=CHART_TICKER,
         oanda_api_key=OANDA_API_KEY,
         oanda_instrument=OANDA_INSTRUMENT,
         oanda_environment=OANDA_ENVIRONMENT,
@@ -87,14 +88,14 @@ def main():
 
     while True:
         try:
-            h4_df = source.get_candles("H4", H4_COUNT)
-            h1_df = source.get_candles("H1", H1_COUNT)
-            m15_df = source.get_candles("M15", M15_COUNT)
+            h4 = source.get_candles("H4", H4_COUNT)
+            h1 = source.get_candles("H1", H1_COUNT)
+            m15 = source.get_candles("M15", M15_COUNT)
 
-            log.info(f"Свечи: H4={len(h4_df)} H1={len(h1_df)} M15={len(m15_df)}"
-                     + (f" | последняя M15: {m15_df['time'].iloc[-1]}" if not m15_df.empty else ""))
+            log.info(f"Свечи: H4={len(h4)} H1={len(h1)} M15={len(m15)}"
+                     + (f" | последняя M15: {m15[-1]['time']}" if m15 else ""))
 
-            setup = strategy.evaluate(h4_df, h1_df, m15_df)
+            setup = strategy.evaluate(h4, h1, m15)
 
             if setup is not None:
                 setup_dict = build_setup_dict(setup)

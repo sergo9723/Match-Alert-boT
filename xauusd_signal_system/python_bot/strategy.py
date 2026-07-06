@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Прямой порт логики XAUUSD_TA_Master_v6.pine на Python (pandas), чтобы
-сигналы можно было генерировать без TradingView.
+Прямой порт логики XAUUSD_TA_Master_v6.pine на чистый Python (без
+numpy/pandas — только stdlib), чтобы бот гарантированно работал на любом
+процессоре, включая старые CPU без SSE4.1/AVX, где готовые сборки
+numpy/pandas падают с "Illegal instruction".
 
 Один сетап = тренд (Блок 3/7) + триггер (Блок 5: пробой+ретест ИЛИ отбой от
 уровня по тренду, Блок 4) + свечное подтверждение (Блок 8), без встречной
 графической фигуры (Блок 9). Объём (Блок 6) — бонус к уверенности.
+
+Свеча — dict {"time": datetime, "open", "high", "low", "close", "volume"}.
 
 Состояние (ожидание ретеста после пробоя, антиспам-кулдаун) хранится в
 атрибутах XAUStrategy и переживает между вызовами evaluate() — как `var`
@@ -13,11 +17,9 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
-
-import pandas as pd
 
 
 @dataclass
@@ -69,33 +71,43 @@ class Setup:
     time: datetime
 
 
-def ema(series: pd.Series, period: int) -> pd.Series:
-    return series.ewm(span=period, adjust=False).mean()
+def ema_last(values: list[float], period: int) -> Optional[float]:
+    """Последнее значение EMA (adjust=False, как в pandas .ewm)."""
+    if not values:
+        return None
+    k = 2.0 / (period + 1)
+    result = values[0]
+    for v in values[1:]:
+        result = v * k + result * (1 - k)
+    return result
 
 
-def atr(df: pd.DataFrame, period: int) -> pd.Series:
-    high, low, close = df["high"], df["low"], df["close"]
-    prev_close = close.shift(1)
-    tr = pd.concat([
-        high - low,
-        (high - prev_close).abs(),
-        (low - prev_close).abs(),
-    ], axis=1).max(axis=1)
-    return tr.rolling(period).mean()
+def atr_last(candles: list[dict], period: int) -> Optional[float]:
+    """Последнее значение ATR — простое среднее True Range за последние period баров."""
+    if len(candles) < period + 1:
+        return None
+    trs = []
+    for i in range(1, len(candles)):
+        h, l = candles[i]["high"], candles[i]["low"]
+        pc = candles[i - 1]["close"]
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    tail = trs[-period:]
+    return sum(tail) / len(tail)
 
 
-def find_pivots(df: pd.DataFrame, left: int, right: int) -> tuple[list[int], list[int]]:
+def find_pivots(candles: list[dict], left: int, right: int) -> tuple[list[int], list[int]]:
     """Индексы подтверждённых pivot high / pivot low (симметрично left/right)."""
-    highs = df["high"].values
-    lows = df["low"].values
-    n = len(df)
+    n = len(candles)
     piv_high, piv_low = [], []
     for i in range(left, n - right):
-        window_h = highs[i - left:i + right + 1]
-        if highs[i] == window_h.max() and (window_h == highs[i]).sum() == 1:
+        window = candles[i - left:i + right + 1]
+        hi = candles[i]["high"]
+        lo = candles[i]["low"]
+        window_highs = [c["high"] for c in window]
+        window_lows = [c["low"] for c in window]
+        if hi == max(window_highs) and window_highs.count(hi) == 1:
             piv_high.append(i)
-        window_l = lows[i - left:i + right + 1]
-        if lows[i] == window_l.min() and (window_l == lows[i]).sum() == 1:
+        if lo == min(window_lows) and window_lows.count(lo) == 1:
             piv_low.append(i)
     return piv_high, piv_low
 
@@ -131,36 +143,37 @@ class XAUStrategy:
             return True
         return now - last_time >= timedelta(minutes=15 * self.p.cooldown_bars)
 
-    def evaluate(self, h4_df: pd.DataFrame, h1_df: pd.DataFrame, m15_df: pd.DataFrame) -> Optional[Setup]:
+    def evaluate(self, h4: list[dict], h1: list[dict], m15: list[dict]) -> Optional[Setup]:
         p = self.p
-        if h4_df.empty or h1_df.empty or m15_df.empty:
+        if not h4 or not h1 or not m15:
             return None
-        if len(h4_df) < p.ema_period + 5 or len(h1_df) < p.ema_period + 5:
+        if len(h4) < p.ema_period + 5 or len(h1) < p.ema_period + 5:
             return None  # недостаточно истории для EMA200 — ждём догрузки данных
 
-        last_m15_time = m15_df["time"].iloc[-1]
+        last_m15_time = m15[-1]["time"]
         if self.last_processed_m15_time is not None and last_m15_time <= self.last_processed_m15_time:
             return None  # новый закрытый M15-бар ещё не появился
         self.last_processed_m15_time = last_m15_time
 
         # ── Блок 1: текущая M15-свеча ──
-        c = m15_df.iloc[-1]
-        prev = m15_df.iloc[-2]
+        c = m15[-1]
+        prev = m15[-2]
         close, open_, high, low = c["close"], c["open"], c["high"], c["low"]
         candle_bull = close > open_
         candle_bear = close < open_
         body = abs(close - open_)
-        rng = high - low
         upper_shadow = high - max(open_, close)
         lower_shadow = min(open_, close) - low
         prev_open, prev_close = prev["open"], prev["close"]
         prev_body = abs(prev_close - prev_open)
 
-        # ── Блок 3/7: тренд по EMA200 H4+H1 (без репейнта — берём последний ЗАКРЫТЫЙ бар) ──
-        ema_h4 = ema(h4_df["close"], p.ema_period).iloc[-1]
-        ema_h1 = ema(h1_df["close"], p.ema_period).iloc[-1]
-        atr14_h1 = atr(h1_df, p.atr_period).iloc[-1]
-        atr14_m15 = atr(m15_df, p.atr_period).iloc[-1]
+        # ── Блок 3/7: тренд по EMA200 H4+H1 (без репейнта — последний ЗАКРЫТЫЙ бар) ──
+        ema_h4 = ema_last([x["close"] for x in h4], p.ema_period)
+        ema_h1 = ema_last([x["close"] for x in h1], p.ema_period)
+        atr14_h1 = atr_last(h1, p.atr_period)
+        atr14_m15 = atr_last(m15, p.atr_period)
+        if ema_h4 is None or ema_h1 is None or atr14_h1 is None or atr14_m15 is None:
+            return None
 
         flat = abs(ema_h4 - ema_h1) < atr14_h1 * p.flat_atr_mult
         if flat:
@@ -175,9 +188,9 @@ class XAUStrategy:
         trend_down = trend_state == -1
 
         # ── Блок 4: S/R — pivot high/low на H1 ──
-        piv_high_idx, piv_low_idx = find_pivots(h1_df, p.sr_pivot_lr, p.sr_pivot_lr)
-        pivot_highs = list(h1_df["high"].iloc[piv_high_idx])[-p.sr_max_levels:]
-        pivot_lows = list(h1_df["low"].iloc[piv_low_idx])[-p.sr_max_levels:]
+        piv_high_idx, piv_low_idx = find_pivots(h1, p.sr_pivot_lr, p.sr_pivot_lr)
+        pivot_highs = [h1[i]["high"] for i in piv_high_idx][-p.sr_max_levels:]
+        pivot_lows = [h1[i]["low"] for i in piv_low_idx][-p.sr_max_levels:]
 
         nearest_resistance = nearest_above(pivot_highs, close)
         nearest_support = nearest_below(pivot_lows, close)
@@ -201,13 +214,8 @@ class XAUStrategy:
         now = last_m15_time
         bars_since_pending = None
         if self.pending_dir != 0 and self.pending_breakout_time is not None:
-            # считаем баров ТОЧНО по числу строк в окне (устойчиво к выходным-гэпам),
-            # а не по разнице во времени / 15 минут
-            matches = m15_df.index[m15_df["time"] == self.pending_breakout_time]
-            if len(matches) > 0:
-                bars_since_pending = (len(m15_df) - 1) - matches[0]
-            else:
-                bars_since_pending = p.retest_max_bars + 1  # пробой вышел за пределы окна — считаем истёкшим
+            idx = next((i for i, x in enumerate(m15) if x["time"] == self.pending_breakout_time), None)
+            bars_since_pending = (len(m15) - 1 - idx) if idx is not None else (p.retest_max_bars + 1)
 
         if self.pending_dir == 1 and bars_since_pending is not None and p.retest_min_bars <= bars_since_pending <= p.retest_max_bars:
             if close >= self.pending_level and (close - self.pending_level) / pip <= p.sr_zone_pts and candle_bull:
@@ -249,8 +257,9 @@ class XAUStrategy:
         candle_dir = 1 if (bullish_pin_bar or bullish_engulf) else (-1 if (bearish_pin_bar or bearish_engulf) else 0)
 
         # ── Блок 6: объём (бонус) ──
-        avg_vol = m15_df["volume"].rolling(p.vol_period).mean().iloc[-1]
-        vol_ratio = (c["volume"] / avg_vol) if avg_vol and avg_vol > 0 else 0.0
+        vol_window = [x["volume"] for x in m15[-p.vol_period:]]
+        avg_vol = (sum(vol_window) / len(vol_window)) if vol_window else 0.0
+        vol_ratio = (c["volume"] / avg_vol) if avg_vol > 0 else 0.0
         vol_ok = vol_ratio >= p.vol_mult
 
         # ── Блок 9: графические фигуры (двойная вершина/дно — вето) ──
@@ -292,8 +301,7 @@ class XAUStrategy:
                 direction="LONG", setup_type=setup_long_type,
                 entry=close, sl=close - sl_dist, tp=close + tp_dist,
                 trend="UP", vol_ratio=round(vol_ratio, 2), vol_ok=vol_ok,
-                pattern_note=pattern_note, bonus=bonus_long,
-                time=now.to_pydatetime() if hasattr(now, "to_pydatetime") else now,
+                pattern_note=pattern_note, bonus=bonus_long, time=now,
             )
 
         self.last_short_time = now
@@ -301,6 +309,5 @@ class XAUStrategy:
             direction="SHORT", setup_type=setup_short_type,
             entry=close, sl=close + sl_dist, tp=close - tp_dist,
             trend="DOWN", vol_ratio=round(vol_ratio, 2), vol_ok=vol_ok,
-            pattern_note=pattern_note, bonus=bonus_short,
-            time=now.to_pydatetime() if hasattr(now, "to_pydatetime") else now,
+            pattern_note=pattern_note, bonus=bonus_short, time=now,
         )

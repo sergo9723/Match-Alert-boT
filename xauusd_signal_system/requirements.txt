@@ -3,12 +3,8 @@ requests>=2.31
 anthropic>=0.40
 python-dotenv>=1.0
 
-# python_bot/ — чистый Python-бот (без TradingView)
-# Верхние границы намеренные: numpy 2.x / pandas 3.x собраны под более новый
-# набор CPU-инструкций и на старом/нетипичном железе падают с "Illegal instruction".
-pandas>=2.0,<3.0
-numpy>=1.24,<2.0
-yfinance>=0.2.40
+# python_bot/ — чистый Python-бот (без TradingView, без numpy/pandas/yfinance —
+# работает на любом CPU, включая старые процессоры без SSE4.1/AVX)
 
 # webhook_relay.py — legacy-вариант через TradingView webhook (нужен платный план)
 flask>=3.0
