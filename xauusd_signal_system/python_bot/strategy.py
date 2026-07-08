@@ -51,7 +51,10 @@ class StrategyParams:
     vol_period: int = 20
     vol_mult: float = 1.3
 
-    pin_bar_ratio: float = 2.0
+    # Бэктест на 3.5 годах XAUUSD показал: 1.5 даёт И больше сделок, И
+    # чуть лучше edge, чем 2.0 — единственная найденная настройка без
+    # компромисса качество/количество.
+    pin_bar_ratio: float = 1.5
     doji_max_body: float = 0.1
 
     pattern_tol_pts: float = 250
@@ -63,7 +66,11 @@ class StrategyParams:
     sl_pts: float = 500
     tp_pts: float = 1000
 
-    min_bonus: int = 0
+    # Бэктест: сделки с bonus=0 (ни объём, ни фигура/FVG не подтвердили)
+    # были статистически убыточны сами по себе (32.4% при безубытке 33.3%).
+    # min_bonus=1 отсекает эту подвыборку — сделок вдвое меньше, но edge
+    # вырос в 2.5 раза (+0.240R против +0.096R на XAUUSD 2023-2026).
+    min_bonus: int = 1
     cooldown_bars: int = 6
 
     # Бэктест на 3.5 годах XAUUSD (2023-01 — 2026-07) показал: "Отбой от S/R"
@@ -71,7 +78,7 @@ class StrategyParams:
     # (31.2% против нужных 33.3%), а "Liquidity Sweep" (протыкание уровня
     # тенью + закрытие обратно) — выше (36.2%). require_liquidity_sweep=True
     # отключает слабый вариант и оставляет только Liquidity Sweep.
-    require_liquidity_sweep: bool = False
+    require_liquidity_sweep: bool = True
 
     pip_size: float = 0.01  # syminfo.mintick аналог: 1 pt для XAUUSD = 0.01
 
