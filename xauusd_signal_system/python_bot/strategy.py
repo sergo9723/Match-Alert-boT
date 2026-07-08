@@ -5,9 +5,20 @@ numpy/pandas — только stdlib), чтобы бот гарантирова�
 процессоре, включая старые CPU без SSE4.1/AVX, где готовые сборки
 numpy/pandas падают с "Illegal instruction".
 
-Один сетап = тренд (Блок 3/7) + триггер (Блок 5: пробой+ретест ИЛИ отбой от
-уровня по тренду, Блок 4) + свечное подтверждение (Блок 8), без встречной
-графической фигуры (Блок 9). Объём (Блок 6) — бонус к уверенности.
+Один сетап = тренд (Блок 3/7) + триггер (Блок 5: пробой+ретест ИЛИ
+liquidity sweep/отбой от уровня по тренду, Блок 4) + свечное подтверждение
+(Блок 8), без встречной графической фигуры (Блок 9) и без CHoCH против
+направления сделки. Объём, попадание в FVG (imbalance) — бонус к уверенности.
+
+SMC-дополнения:
+- Liquidity sweep — цена протыкает уровень тенью (собирает стопы) и
+  закрывается обратно за него: признак ложного пробоя, сильнее простого
+  "отбоя от уровня".
+- FVG (Fair Value Gap) — 3-свечная модель имбаланса, бонус к уверенности,
+  если цена сейчас в зоне недавнего непокрытого гэпа по направлению сделки.
+- CHoCH (Change of Character) — слом структуры (HH/HL или LH/LL) на H1;
+  вето против входа в сторону, откуда только что пришёл сигнал разворота,
+  даже если EMA200 ещё не успела это подтвердить.
 
 Свеча — dict {"time": datetime, "open", "high", "low", "close", "volume"}.
 
@@ -120,6 +131,36 @@ def nearest_above(levels: list[float], price: float) -> Optional[float]:
 def nearest_below(levels: list[float], price: float) -> Optional[float]:
     candidates = [lv for lv in levels if lv < price]
     return max(candidates) if candidates else None
+
+
+def find_recent_fvg_zones(candles: list[dict], lookback: int = 30) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """Imbalance / Fair Value Gap: 3-свечная модель, где тело средней свечи
+    оставляет непокрытый разрыв между тенями свечи 1 и свечи 3. Бычий FVG —
+    потенциальная зона докупки на откате внутри аптренда, медвежий — зеркально."""
+    bull_zones, bear_zones = [], []
+    start = max(2, len(candles) - lookback)
+    for i in range(start, len(candles)):
+        a, c = candles[i - 2], candles[i]
+        if c["low"] > a["high"]:
+            bull_zones.append((a["high"], c["low"]))
+        if c["high"] < a["low"]:
+            bear_zones.append((c["high"], a["low"]))
+    return bull_zones, bear_zones
+
+
+def price_in_zone(price: float, zones: list[tuple[float, float]]) -> bool:
+    return any(lo <= price <= hi for lo, hi in zones)
+
+
+def detect_choch(pivot_highs: list[float], pivot_lows: list[float], close: float) -> tuple[bool, bool]:
+    """CHoCH (Change of Character) — ранний сигнал слома структуры тренда:
+    bearish_choch = структура делала растущие лои (HL), но цена только что
+    пробила последний лой вниз — восходящая структура ломается.
+    bullish_choch = структура делала падающие хаи (LH), но цена пробила
+    последний хай вверх — нисходящая структура ломается."""
+    bearish_choch = len(pivot_lows) >= 2 and pivot_lows[-1] > pivot_lows[-2] and close < pivot_lows[-1]
+    bullish_choch = len(pivot_highs) >= 2 and pivot_highs[-1] < pivot_highs[-2] and close > pivot_highs[-1]
+    return bullish_choch, bearish_choch
 
 
 class XAUStrategy:
@@ -241,13 +282,32 @@ class XAUStrategy:
             self.pending_dir = -1
             self.pending_breakout_time = now
 
-        bounce_long = trend_up and price_at_support and candle_bull
-        bounce_short = trend_down and price_at_resistance and candle_bear
+        # Liquidity sweep (SMC, "ложный пробой"/стоп-хант): цена протыкает
+        # уровень тенью (собирает стопы/ликвидность за ним), но ЗАКРЫВАЕТСЯ
+        # обратно за уровнем — признак ложного пробоя и разворота в сторону
+        # тренда, а не начала нового движения. Сильнее, чем просто "цена
+        # рядом с уровнем", поэтому проверяется первым.
+        swept_support = nearest_support is not None and low < nearest_support and close > nearest_support
+        swept_resistance = nearest_resistance is not None and high > nearest_resistance and close < nearest_resistance
+
+        liquidity_sweep_long = trend_up and swept_support and candle_bull
+        liquidity_sweep_short = trend_down and swept_resistance and candle_bear
+
+        bounce_long = liquidity_sweep_long or (trend_up and price_at_support and candle_bull)
+        bounce_short = liquidity_sweep_short or (trend_down and price_at_resistance and candle_bear)
 
         setup_long_trigger = retest_long or bounce_long
         setup_short_trigger = retest_short or bounce_short
-        setup_long_type = "Пробой+Ретест" if retest_long else ("Отбой от S/R" if bounce_long else "нет")
-        setup_short_type = "Пробой+Ретест" if retest_short else ("Отбой от S/R" if bounce_short else "нет")
+        setup_long_type = (
+            "Пробой+Ретест" if retest_long else
+            "Liquidity Sweep" if liquidity_sweep_long else
+            "Отбой от S/R" if bounce_long else "нет"
+        )
+        setup_short_type = (
+            "Пробой+Ретест" if retest_short else
+            "Liquidity Sweep" if liquidity_sweep_short else
+            "Отбой от S/R" if bounce_short else "нет"
+        )
 
         # ── Блок 8: свечные паттерны ──
         bullish_pin_bar = lower_shadow >= body * p.pin_bar_ratio and upper_shadow <= body * 0.5 and body > 0
@@ -275,15 +335,32 @@ class XAUStrategy:
                 double_bottom = True
         pattern_note = "⚠ Дв.вершина" if double_top else ("⚠ Дв.дно" if double_bottom else "нет")
 
+        # ── Imbalance / Fair Value Gap на M15 (бонус) ──
+        bull_fvg_zones, bear_fvg_zones = find_recent_fvg_zones(m15, lookback=30)
+        in_bull_fvg = price_in_zone(close, bull_fvg_zones)
+        in_bear_fvg = price_in_zone(close, bear_fvg_zones)
+        if in_bull_fvg:
+            pattern_note = (pattern_note + " | FVG") if pattern_note != "нет" else "FVG"
+        if in_bear_fvg:
+            pattern_note = (pattern_note + " | FVG") if pattern_note != "нет" else "FVG"
+
+        # ── CHoCH — слом структуры тренда на H1 (вето против входа в сторону
+        # зарождающегося разворота, который EMA200 ещё не подтвердил) ──
+        bullish_choch, bearish_choch = detect_choch(pivot_highs, pivot_lows, close)
+        if bearish_choch:
+            pattern_note = (pattern_note + " | ⚠CHoCH↓") if pattern_note != "нет" else "⚠CHoCH↓"
+        if bullish_choch:
+            pattern_note = (pattern_note + " | ⚠CHoCH↑") if pattern_note != "нет" else "⚠CHoCH↑"
+
         # ── Сборка сетапа: ядро + бонусы + вето ──
         core_long = trend_up and setup_long_trigger and candle_dir == 1
         core_short = trend_down and setup_short_trigger and candle_dir == -1
 
-        bonus_long = (1 if vol_ok else 0) + (1 if double_bottom else 0)
-        bonus_short = (1 if vol_ok else 0) + (1 if double_top else 0)
+        bonus_long = (1 if vol_ok else 0) + (1 if double_bottom else 0) + (1 if in_bull_fvg else 0)
+        bonus_short = (1 if vol_ok else 0) + (1 if double_top else 0) + (1 if in_bear_fvg else 0)
 
-        long_ok = core_long and not double_top and bonus_long >= p.min_bonus
-        short_ok = core_short and not double_bottom and bonus_short >= p.min_bonus
+        long_ok = core_long and not double_top and not bearish_choch and bonus_long >= p.min_bonus
+        short_ok = core_short and not double_bottom and not bullish_choch and bonus_short >= p.min_bonus
 
         long_signal = long_ok and self._cooldown_ok(self.last_long_time, now)
         short_signal = short_ok and self._cooldown_ok(self.last_short_time, now)
