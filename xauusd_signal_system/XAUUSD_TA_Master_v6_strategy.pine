@@ -16,20 +16,25 @@
 //   4. По умолчанию тест идёт на ВСЕЙ доступной истории графика — можно
 //      ограничить период через "Properties" стратегии.
 //
-// ВАЖНО: прошлая доходность не гарантирует будущую. Комиссию/спред
-// (inpCommissionPts/inpSlippagePts) выставьте под своего брокера —
-// без реалистичного спреда цифры будут завышены.
+// ВАЖНО: прошлая доходность не гарантирует будущую. Начальный капитал,
+// размер позиции, комиссия и слиппедж (см. BACKTEST_* константы чуть ниже)
+// у strategy() ОБЯЗАНЫ быть константами прямо в коде — Pine не разрешает
+// передавать туда input.*() значения (в отличие от почти всех остальных
+// мест в скрипте). Хотите изменить — правьте цифры ниже вручную и
+// пересохраните скрипт, через панель настроек это не работает.
 //@version=6
 
 // ═══════════════════════════════════════════════════════════════════
-// ВХОДНЫЕ ПАРАМЕТРЫ (идентичны indicator-версии + настройки бэктеста)
+// КОНСТАНТЫ БЭКТЕСТА — редактируются прямо в коде (см. комментарий выше)
 // ═══════════════════════════════════════════════════════════════════
+// BACKTEST_INITIAL_CAPITAL = 1000   // начальный капитал ($)
+// BACKTEST_QTY_USD         = 100    // размер позиции ($ на сделку)
+// BACKTEST_COMMISSION_PCT  = 0.02   // комиссия (% от оборота)
+// BACKTEST_SLIPPAGE_TICKS  = 20     // слиппедж/спред (в тиках = pts) — критично для честного результата
 
-grp_bt = "═══ БЭКТЕСТ ═══"
-inpInitialCapital = input.float(1000, "Начальный капитал ($)", group=grp_bt)
-inpQtyUSD         = input.float(100, "Размер позиции ($ на сделку)", group=grp_bt, tooltip="Условный размер в валюте счёта на каждую сделку")
-inpCommissionPct  = input.float(0.02, "Комиссия (% от оборота)", minval=0, step=0.01, group=grp_bt)
-inpSlippagePts    = input.int(20, "Слиппедж (points)", minval=0, group=grp_bt, tooltip="Проскальзывание/спред в пунктах — критично для честного результата")
+// ═══════════════════════════════════════════════════════════════════
+// ВХОДНЫЕ ПАРАМЕТРЫ (идентичны indicator-версии)
+// ═══════════════════════════════════════════════════════════════════
 
 grp_trend = "═══ БЛОК 3+7: ТРЕНД (EMA200 H4/H1) ═══"
 inpEMAperiod    = input.int(200, "EMA период (H4/H1)", minval=50, group=grp_trend)
@@ -70,10 +75,10 @@ grp_cool = "═══ АНТИСПАМ ═══"
 inpCooldownBars = input.int(6, "Промежуток между сигналами (баров)", minval=1, maxval=30, group=grp_cool)
 
 strategy("XAUUSD TA v6.1 Backtest", overlay=true,
-     initial_capital=inpInitialCapital,
-     default_qty_type=strategy.cash, default_qty_value=inpQtyUSD,
-     commission_type=strategy.commission.percent, commission_value=inpCommissionPct,
-     slippage=inpSlippagePts, calc_on_every_tick=false, process_orders_on_close=true)
+     initial_capital=1000,
+     default_qty_type=strategy.cash, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.02,
+     slippage=20, calc_on_every_tick=false, process_orders_on_close=true)
 
 // ═══════════════════════════════════════════════════════════════════
 // БЛОК 1: СВЕЧА
