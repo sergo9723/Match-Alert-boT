@@ -1,0 +1,324 @@
+// © 2026 XAUUSD TA Master v6.1 — Strategy Tester версия
+// ТА ЖЕ САМАЯ логика сигналов, что в XAUUSD_TA_Master_v6.pine (indicator),
+// но оформлена как strategy() — чтобы TradingView реально бэктестил её на
+// истории и показывал ЧЕСТНЫЕ Win Rate / кол-во сделок / просадку во
+// вкладке "Strategy Tester", вместо того чтобы кто-то (включая меня)
+// предполагал эти цифры на глаз.
+//
+// Как посмотреть результаты:
+//   1. Вставьте скрипт в Pine Editor, Add to Chart (график XAUUSD, M15).
+//   2. Откройте вкладку "Strategy Tester" внизу экрана.
+//   3. Вкладка "Overview" — чистая прибыль, просадка, Sharpe.
+//      Вкладка "Trades analysis" — Win Rate %, Profit Factor, Total Trades,
+//      Avg # trades per day можно прикинуть как Total Trades / число дней
+//      в диапазоне теста (обычно TradingView сам считает "Avg trades per
+//      day/week/month" в разделе Performance Summary).
+//   4. По умолчанию тест идёт на ВСЕЙ доступной истории графика — можно
+//      ограничить период через "Properties" стратегии.
+//
+// ВАЖНО: прошлая доходность не гарантирует будущую. Комиссию/спред
+// (inpCommissionPts/inpSlippagePts) выставьте под своего брокера —
+// без реалистичного спреда цифры будут завышены.
+//@version=6
+
+// ═══════════════════════════════════════════════════════════════════
+// ВХОДНЫЕ ПАРАМЕТРЫ (идентичны indicator-версии + настройки бэктеста)
+// ═══════════════════════════════════════════════════════════════════
+
+grp_bt = "═══ БЭКТЕСТ ═══"
+inpInitialCapital = input.float(1000, "Начальный капитал ($)", group=grp_bt)
+inpQtyUSD         = input.float(100, "Размер позиции ($ на сделку)", group=grp_bt, tooltip="Условный размер в валюте счёта на каждую сделку")
+inpCommissionPct  = input.float(0.02, "Комиссия (% от оборота)", minval=0, step=0.01, group=grp_bt)
+inpSlippagePts    = input.int(20, "Слиппедж (points)", minval=0, group=grp_bt, tooltip="Проскальзывание/спред в пунктах — критично для честного результата")
+
+grp_trend = "═══ БЛОК 3+7: ТРЕНД (EMA200 H4/H1) ═══"
+inpEMAperiod    = input.int(200, "EMA период (H4/H1)", minval=50, group=grp_trend)
+inpFlatATRmult  = input.float(0.6, "Порог 'боковика' (× ATR)", minval=0.1, step=0.1, group=grp_trend)
+
+grp_sr = "═══ БЛОК 4: S/R УРОВНИ (pivot H1) ═══"
+inpSRPivotLR    = input.int(3, "Плечо pivot на H1 (баров)", minval=1, maxval=10, group=grp_sr)
+inpSRMaxLevels  = input.int(15, "Кол-во хранимых уровней", minval=5, maxval=40, group=grp_sr)
+inpSRZonePts    = input.int(300, "Зона реакции возле уровня (pts)", minval=50, group=grp_sr)
+
+grp_bo = "═══ БЛОК 5: ПРОБОЙ + РЕТЕСТ ═══"
+inpBreakoutBufPts = input.int(150, "Мин. пробой за уровень (pts)", minval=50, group=grp_bo)
+inpRetestMinBars  = input.int(2, "Мин. баров до ретеста", minval=1, maxval=10, group=grp_bo)
+inpRetestMaxBars  = input.int(20, "Макс. баров ожидания ретеста", minval=5, maxval=60, group=grp_bo)
+
+grp_vol = "═══ БЛОК 6: ОБЪЁМ (бонус) ═══"
+inpVolPeriod    = input.int(20, "Баров для среднего объёма", minval=5, group=grp_vol)
+inpVolMult      = input.float(1.3, "Множитель объёма", minval=1.0, step=0.1, group=grp_vol)
+
+grp_candle = "═══ БЛОК 1+8: СВЕЧНЫЕ ПАТТЕРНЫ ═══"
+inpPinBarRatio  = input.float(2.0, "Pin Bar тень/тело", minval=1.5, group=grp_candle)
+inpDojiMaxBody  = input.float(0.1, "Doji: тело ≤ X × диапазон", minval=0.02, step=0.01, group=grp_candle)
+
+grp_pattern = "═══ БЛОК 9: ГРАФИЧЕСКИЕ ФИГУРЫ + SMC ═══"
+inpPatternTolPts = input.int(250, "Допуск равенства вершин/дна (pts)", minval=50, group=grp_pattern)
+inpFVGLookback   = input.int(30, "Баров назад для поиска FVG", minval=5, maxval=100, group=grp_pattern)
+
+grp_entry = "═══ БЛОК 10: ВХОД / SL / TP ═══"
+inpUseATR       = input.bool(true, "SL/TP по ATR (рекомендую)", group=grp_entry)
+inpATRPeriod    = input.int(14, "Период ATR", minval=5, group=grp_entry)
+inpATR_SLmult   = input.float(1.5, "SL = ATR ×", minval=0.5, step=0.1, group=grp_entry)
+inpRR           = input.float(2.0, "TP = SL × R:R", minval=1.0, step=0.1, group=grp_entry)
+inpSL_pts       = input.int(500, "SL фикс. (pts, если ATR выкл.)", minval=100, group=grp_entry)
+inpTP_pts       = input.int(1000, "TP фикс. (pts, если ATR выкл.)", minval=100, group=grp_entry)
+inpMinBonus     = input.int(0, "Мин. бонус-очков", minval=0, maxval=3, group=grp_entry)
+
+grp_cool = "═══ АНТИСПАМ ═══"
+inpCooldownBars = input.int(6, "Промежуток между сигналами (баров)", minval=1, maxval=30, group=grp_cool)
+
+strategy("XAUUSD TA v6.1 Backtest", overlay=true,
+     initial_capital=inpInitialCapital,
+     default_qty_type=strategy.cash, default_qty_value=inpQtyUSD,
+     commission_type=strategy.commission.percent, commission_value=inpCommissionPct,
+     slippage=inpSlippagePts, calc_on_every_tick=false, process_orders_on_close=true)
+
+// ═══════════════════════════════════════════════════════════════════
+// БЛОК 1: СВЕЧА
+// ═══════════════════════════════════════════════════════════════════
+
+candleBull  = close > open
+candleBear  = close < open
+body        = math.abs(close - open)
+rng         = high - low
+upperShadow = high - math.max(open, close)
+lowerShadow = math.min(open, close) - low
+
+prevOpen  = open[1]
+prevClose = close[1]
+prevBody  = math.abs(prevClose - prevOpen)
+
+// ═══════════════════════════════════════════════════════════════════
+// БЛОК 2+3+7: ТРЕНД (EMA200 H4/H1, без репейнта)
+// ═══════════════════════════════════════════════════════════════════
+
+emaH4 = request.security(syminfo.tickerid, "240", ta.ema(close, inpEMAperiod)[1], lookahead=barmerge.lookahead_off)
+emaH1 = request.security(syminfo.tickerid, "60", ta.ema(close, inpEMAperiod)[1], lookahead=barmerge.lookahead_off)
+atr14 = ta.atr(inpATRPeriod)
+
+emaSpreadFlat = math.abs(emaH4 - emaH1) < atr14 * inpFlatATRmult
+
+trendState = emaSpreadFlat ? 0 : (close > emaH4 and close > emaH1 ? 1 : close < emaH4 and close < emaH1 ? -1 : 0)
+trendUp    = trendState == 1
+trendDown  = trendState == -1
+
+// ═══════════════════════════════════════════════════════════════════
+// БЛОК 4: S/R УРОВНИ — pivot high/low на H1
+// ═══════════════════════════════════════════════════════════════════
+
+h1PivHighRaw = request.security(syminfo.tickerid, "60", ta.pivothigh(high, inpSRPivotLR, inpSRPivotLR), lookahead=barmerge.lookahead_off)
+h1PivLowRaw  = request.security(syminfo.tickerid, "60", ta.pivotlow(low, inpSRPivotLR, inpSRPivotLR), lookahead=barmerge.lookahead_off)
+
+var array<float> pivotHighs = array.new<float>()
+var array<float> pivotLows  = array.new<float>()
+var float lastPivHighPushed = na
+var float lastPivLowPushed  = na
+
+if not na(h1PivHighRaw) and h1PivHighRaw != lastPivHighPushed
+    array.push(pivotHighs, h1PivHighRaw)
+    lastPivHighPushed := h1PivHighRaw
+    if array.size(pivotHighs) > inpSRMaxLevels
+        array.shift(pivotHighs)
+
+if not na(h1PivLowRaw) and h1PivLowRaw != lastPivLowPushed
+    array.push(pivotLows, h1PivLowRaw)
+    lastPivLowPushed := h1PivLowRaw
+    if array.size(pivotLows) > inpSRMaxLevels
+        array.shift(pivotLows)
+
+nearestAbove(arr, price) =>
+    float result = na
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            v = array.get(arr, i)
+            if v > price and (na(result) or v < result)
+                result := v
+    result
+
+nearestBelow(arr, price) =>
+    float result = na
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            v = array.get(arr, i)
+            if v < price and (na(result) or v > result)
+                result := v
+    result
+
+nearestResistance = nearestAbove(pivotHighs, close)
+nearestSupport    = nearestBelow(pivotLows, close)
+
+priceAtResistance = not na(nearestResistance) and close <= nearestResistance and (nearestResistance - close) / syminfo.mintick <= inpSRZonePts
+priceAtSupport    = not na(nearestSupport) and close >= nearestSupport and (close - nearestSupport) / syminfo.mintick <= inpSRZonePts
+
+// ═══════════════════════════════════════════════════════════════════
+// БЛОК 5: ПРОБОЙ + РЕТЕСТ + LIQUIDITY SWEEP
+// ═══════════════════════════════════════════════════════════════════
+
+var float pendingLevel       = na
+var int   pendingDir         = 0
+var int   pendingBreakoutBar = na
+
+brokeResUp   = not na(nearestResistance) and close > nearestResistance + inpBreakoutBufPts * syminfo.mintick
+brokeSupDown = not na(nearestSupport) and close < nearestSupport - inpBreakoutBufPts * syminfo.mintick
+
+retestLongTrigger  = false
+retestShortTrigger = false
+
+if barstate.isconfirmed
+    barsSincePending = pendingDir != 0 ? bar_index - pendingBreakoutBar : na
+
+    if pendingDir == 1 and not na(barsSincePending) and barsSincePending >= inpRetestMinBars and barsSincePending <= inpRetestMaxBars
+        if close >= pendingLevel and (close - pendingLevel) / syminfo.mintick <= inpSRZonePts and candleBull
+            retestLongTrigger := true
+    if pendingDir == -1 and not na(barsSincePending) and barsSincePending >= inpRetestMinBars and barsSincePending <= inpRetestMaxBars
+        if close <= pendingLevel and (pendingLevel - close) / syminfo.mintick <= inpSRZonePts and candleBear
+            retestShortTrigger := true
+
+    if pendingDir == 1 and close < pendingLevel - inpBreakoutBufPts * syminfo.mintick
+        pendingDir := 0
+    if pendingDir == -1 and close > pendingLevel + inpBreakoutBufPts * syminfo.mintick
+        pendingDir := 0
+
+    if pendingDir != 0 and not na(barsSincePending) and barsSincePending > inpRetestMaxBars
+        pendingDir := 0
+
+    if retestLongTrigger or retestShortTrigger
+        pendingDir := 0
+
+    if brokeResUp
+        pendingLevel := nearestResistance
+        pendingDir := 1
+        pendingBreakoutBar := bar_index
+    if brokeSupDown
+        pendingLevel := nearestSupport
+        pendingDir := -1
+        pendingBreakoutBar := bar_index
+
+sweptSupport    = not na(nearestSupport) and low < nearestSupport and close > nearestSupport
+sweptResistance = not na(nearestResistance) and high > nearestResistance and close < nearestResistance
+
+liquiditySweepLong  = trendUp and sweptSupport and candleBull
+liquiditySweepShort = trendDown and sweptResistance and candleBear
+
+bounceLongTrigger  = liquiditySweepLong or (trendUp and priceAtSupport and candleBull)
+bounceShortTrigger = liquiditySweepShort or (trendDown and priceAtResistance and candleBear)
+
+setupLongTrigger  = retestLongTrigger or bounceLongTrigger
+setupShortTrigger = retestShortTrigger or bounceShortTrigger
+
+setupLongType  = retestLongTrigger ? "Пробой+Ретест" : liquiditySweepLong ? "Liquidity Sweep" : bounceLongTrigger ? "Отбой от S/R" : "нет"
+setupShortType = retestShortTrigger ? "Пробой+Ретест" : liquiditySweepShort ? "Liquidity Sweep" : bounceShortTrigger ? "Отбой от S/R" : "нет"
+
+// ═══════════════════════════════════════════════════════════════════
+// БЛОК 8: СВЕЧНЫЕ ПАТТЕРНЫ
+// ═══════════════════════════════════════════════════════════════════
+
+bullishPinBar     = lowerShadow >= body * inpPinBarRatio and upperShadow <= body * 0.5 and body > 0
+bearishPinBar     = upperShadow >= body * inpPinBarRatio and lowerShadow <= body * 0.5 and body > 0
+bullishEngulfing  = prevClose < prevOpen and candleBull and close > prevOpen and open < prevClose and body > prevBody * 1.1
+bearishEngulfing  = prevClose > prevOpen and candleBear and close < prevOpen and open > prevClose and body > prevBody * 1.1
+isDoji            = rng > 0 and body <= rng * inpDojiMaxBody
+
+candleDir = bullishPinBar or bullishEngulfing ? 1 : bearishPinBar or bearishEngulfing ? -1 : 0
+
+// ═══════════════════════════════════════════════════════════════════
+// БЛОК 6: ОБЪЁМ (бонус)
+// ═══════════════════════════════════════════════════════════════════
+
+avgVol   = ta.sma(volume, inpVolPeriod)
+volRatio = avgVol > 0 ? volume / avgVol : 0.0
+volOK    = volRatio >= inpVolMult
+
+// ═══════════════════════════════════════════════════════════════════
+// БЛОК 9: ГРАФИЧЕСКИЕ ФИГУРЫ + SMC (FVG, CHoCH)
+// ═══════════════════════════════════════════════════════════════════
+
+doubleTopActive = false
+doubleBottomActive = false
+if array.size(pivotHighs) >= 2
+    h1_ = array.get(pivotHighs, array.size(pivotHighs) - 1)
+    h2_ = array.get(pivotHighs, array.size(pivotHighs) - 2)
+    if math.abs(h1_ - h2_) / syminfo.mintick <= inpPatternTolPts and not na(nearestSupport) and close < nearestSupport
+        doubleTopActive := true
+if array.size(pivotLows) >= 2
+    l1_ = array.get(pivotLows, array.size(pivotLows) - 1)
+    l2_ = array.get(pivotLows, array.size(pivotLows) - 2)
+    if math.abs(l1_ - l2_) / syminfo.mintick <= inpPatternTolPts and not na(nearestResistance) and close > nearestResistance
+        doubleBottomActive := true
+
+bool inBullFVG = false
+bool inBearFVG = false
+for k = 0 to inpFVGLookback - 1
+    aHigh = high[k + 2]
+    aLow  = low[k + 2]
+    cHigh = high[k]
+    cLow  = low[k]
+    if cLow > aHigh and close >= aHigh and close <= cLow
+        inBullFVG := true
+    if cHigh < aLow and close <= aLow and close >= cHigh
+        inBearFVG := true
+
+bearishChoch = array.size(pivotLows) >= 2 and array.get(pivotLows, array.size(pivotLows) - 1) > array.get(pivotLows, array.size(pivotLows) - 2) and close < array.get(pivotLows, array.size(pivotLows) - 1)
+bullishChoch = array.size(pivotHighs) >= 2 and array.get(pivotHighs, array.size(pivotHighs) - 1) < array.get(pivotHighs, array.size(pivotHighs) - 2) and close > array.get(pivotHighs, array.size(pivotHighs) - 1)
+
+// ═══════════════════════════════════════════════════════════════════
+// СБОРКА СЕТАПА
+// ═══════════════════════════════════════════════════════════════════
+
+coreLong  = trendUp   and setupLongTrigger  and candleDir == 1
+coreShort = trendDown and setupShortTrigger and candleDir == -1
+
+bonusLong  = (volOK ? 1 : 0) + (doubleBottomActive ? 1 : 0) + (inBullFVG ? 1 : 0)
+bonusShort = (volOK ? 1 : 0) + (doubleTopActive ? 1 : 0) + (inBearFVG ? 1 : 0)
+
+vetoLong  = doubleTopActive or bearishChoch
+vetoShort = doubleBottomActive or bullishChoch
+
+longSetupOK  = coreLong  and not vetoLong  and bonusLong  >= inpMinBonus
+shortSetupOK = coreShort and not vetoShort and bonusShort >= inpMinBonus
+
+// ═══════════════════════════════════════════════════════════════════
+// СИГНАЛЫ (антиспам + строго на закрытом баре)
+// ═══════════════════════════════════════════════════════════════════
+
+var int lastLongBar  = -100
+var int lastShortBar = -100
+
+barsSinceLong  = bar_index - lastLongBar
+barsSinceShort = bar_index - lastShortBar
+
+longSignal  = longSetupOK  and barsSinceLong  >= inpCooldownBars and barstate.isconfirmed
+shortSignal = shortSetupOK and barsSinceShort >= inpCooldownBars and barstate.isconfirmed
+
+if longSignal
+    lastLongBar := bar_index
+if shortSignal
+    lastShortBar := bar_index
+
+// ═══════════════════════════════════════════════════════════════════
+// БЛОК 10: ВХОД / SL / TP + ИСПОЛНЕНИЕ СДЕЛОК (то, чего нет в indicator-версии)
+// ═══════════════════════════════════════════════════════════════════
+
+slDist = inpUseATR ? atr14 * inpATR_SLmult : inpSL_pts * syminfo.mintick
+tpDist = inpUseATR ? slDist * inpRR : inpTP_pts * syminfo.mintick
+
+if longSignal
+    longSL = close - slDist
+    longTP = close + tpDist
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long TP/SL", "Long", stop=longSL, limit=longTP)
+
+if shortSignal
+    shortSL = close + slDist
+    shortTP = close - tpDist
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short TP/SL", "Short", stop=shortSL, limit=shortTP)
+
+// ═══════════════════════════════════════════════════════════════════
+// СТРЕЛКИ (для наглядности поверх бэктеста)
+// ═══════════════════════════════════════════════════════════════════
+
+plotshape(longSignal, title="LONG", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.small)
+plotshape(shortSignal, title="SHORT", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
