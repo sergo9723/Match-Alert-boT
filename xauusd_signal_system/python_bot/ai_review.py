@@ -99,7 +99,8 @@ liquidity sweep, свечные паттерны, FVG, CHoCH). Вот стати
         max_tokens=800,
         messages=[{"role": "user", "content": prompt}],
     )
-    return resp.content[0].text
+    text_blocks = [b.text for b in resp.content if getattr(b, "type", None) == "text"]
+    return "\n".join(text_blocks)
 
 
 if __name__ == "__main__":

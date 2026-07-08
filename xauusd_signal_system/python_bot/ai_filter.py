@@ -56,7 +56,8 @@ CONFIRM или REJECT
             max_tokens=100,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = resp.content[0].text.strip()
+        text_blocks = [b.text for b in resp.content if getattr(b, "type", None) == "text"]
+        text = "\n".join(text_blocks).strip()
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         verdict = lines[0].upper() if lines else "REJECT"
         reason = lines[1] if len(lines) > 1 else "нет причины"
