@@ -64,6 +64,13 @@ class StrategyParams:
     min_bonus: int = 0
     cooldown_bars: int = 6
 
+    # Бэктест на 3.5 годах XAUUSD (2023-01 — 2026-07) показал: "Отбой от S/R"
+    # (простая близость к уровню) даёт винрейт НИЖЕ безубытка при RR=2
+    # (31.2% против нужных 33.3%), а "Liquidity Sweep" (протыкание уровня
+    # тенью + закрытие обратно) — выше (36.2%). require_liquidity_sweep=True
+    # отключает слабый вариант и оставляет только Liquidity Sweep.
+    require_liquidity_sweep: bool = False
+
     pip_size: float = 0.01  # syminfo.mintick аналог: 1 pt для XAUUSD = 0.01
 
 
@@ -293,8 +300,11 @@ class XAUStrategy:
         liquidity_sweep_long = trend_up and swept_support and candle_bull
         liquidity_sweep_short = trend_down and swept_resistance and candle_bear
 
-        bounce_long = liquidity_sweep_long or (trend_up and price_at_support and candle_bull)
-        bounce_short = liquidity_sweep_short or (trend_down and price_at_resistance and candle_bear)
+        weak_bounce_long = trend_up and price_at_support and candle_bull
+        weak_bounce_short = trend_down and price_at_resistance and candle_bear
+
+        bounce_long = liquidity_sweep_long if p.require_liquidity_sweep else (liquidity_sweep_long or weak_bounce_long)
+        bounce_short = liquidity_sweep_short if p.require_liquidity_sweep else (liquidity_sweep_short or weak_bounce_short)
 
         setup_long_trigger = retest_long or bounce_long
         setup_short_trigger = retest_short or bounce_short

@@ -82,7 +82,10 @@ def main():
         oanda_instrument=OANDA_INSTRUMENT,
         oanda_environment=OANDA_ENVIRONMENT,
     )
-    strategy = XAUStrategy(StrategyParams())
+    params = StrategyParams()
+    if os.environ.get("REQUIRE_LIQUIDITY_SWEEP", "false").lower() == "true":
+        params.require_liquidity_sweep = True
+    strategy = XAUStrategy(params)
 
     log.info(f"Старт: источник={DATA_SOURCE}, символ={SYMBOL_LABEL}, опрос каждые {POLL_SECONDS}с")
 

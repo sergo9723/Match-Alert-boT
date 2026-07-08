@@ -115,7 +115,7 @@ def simulate_outcome(setup, m15: list[dict], entry_idx: int) -> dict:
     return {"result": "timeout", "bars_held": MAX_HOLD_BARS}
 
 
-def run_backtest(csv_path: str, start: datetime | None, end: datetime | None) -> None:
+def run_backtest(csv_path: str, start: datetime | None, end: datetime | None, params: StrategyParams | None = None) -> None:
     print(f"Загружаю {csv_path}...")
     full_m15 = load_mt5_csv(csv_path)
     if start:
@@ -132,7 +132,7 @@ def run_backtest(csv_path: str, start: datetime | None, end: datetime | None) ->
     h1_close_times = [c["time"] + timedelta(minutes=60) for c in full_h1]
     h4_close_times = [c["time"] + timedelta(minutes=240) for c in full_h4]
 
-    strategy = XAUStrategy(StrategyParams())
+    strategy = XAUStrategy(params or StrategyParams())
     trades = []
 
     print("Прогоняю стратегию по истории (может занять несколько минут)...")
@@ -220,9 +220,21 @@ if __name__ == "__main__":
     parser.add_argument("--csv", required=True, help="Путь к CSV с историей M15 (экспорт из MT5)")
     parser.add_argument("--start", help="Начало периода теста, YYYY-MM-DD (опционально)")
     parser.add_argument("--end", help="Конец периода теста, YYYY-MM-DD (опционально)")
+    parser.add_argument("--require-liquidity-sweep", action="store_true",
+                         help="Отключить слабый триггер 'Отбой от S/R', оставить только Liquidity Sweep")
+    parser.add_argument("--rr", type=float, help="Переопределить R:R (по умолчанию 2.0)")
+    parser.add_argument("--min-bonus", type=int, help="Переопределить мин. бонус-очков (по умолчанию 0)")
     args = parser.parse_args()
 
     start_dt = datetime.strptime(args.start, "%Y-%m-%d") if args.start else None
     end_dt = datetime.strptime(args.end, "%Y-%m-%d") if args.end else None
 
-    run_backtest(args.csv, start_dt, end_dt)
+    params = StrategyParams()
+    if args.require_liquidity_sweep:
+        params.require_liquidity_sweep = True
+    if args.rr is not None:
+        params.rr = args.rr
+    if args.min_bonus is not None:
+        params.min_bonus = args.min_bonus
+
+    run_backtest(args.csv, start_dt, end_dt, params)
