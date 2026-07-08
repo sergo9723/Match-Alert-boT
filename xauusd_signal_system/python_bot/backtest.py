@@ -259,12 +259,14 @@ if __name__ == "__main__":
 
         print("\nЗапрашиваю анализ у Claude по итогам бэктеста...")
         stats = load_backtest_csv("backtest_trades.csv")
-        review = ask_claude_review(stats)
+        review = ask_claude_review(stats, params)
         print("\n" + "=" * 60)
         print(review)
         print("=" * 60)
+        from dataclasses import asdict
         with open("ai_review_report.md", "w", encoding="utf-8") as f:
             f.write("# ИИ-разбор бэктеста\n\n")
             f.write("## Статистика\n\n```json\n" + json.dumps(stats, ensure_ascii=False, indent=2) + "\n```\n\n")
+            f.write("## Использованные настройки\n\n```json\n" + json.dumps(asdict(params), ensure_ascii=False, indent=2) + "\n```\n\n")
             f.write("## Анализ Claude\n\n" + review + "\n")
         print("\nОтчёт сохранён в ai_review_report.md")
