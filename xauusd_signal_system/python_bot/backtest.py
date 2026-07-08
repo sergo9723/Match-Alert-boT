@@ -225,6 +225,10 @@ if __name__ == "__main__":
                          help="Отключить слабый триггер 'Отбой от S/R', оставить только Liquidity Sweep")
     parser.add_argument("--rr", type=float, help="Переопределить R:R (по умолчанию 2.0)")
     parser.add_argument("--min-bonus", type=int, help="Переопределить мин. бонус-очков (по умолчанию 0)")
+    parser.add_argument("--cooldown-bars", type=int, help="Переопределить кулдаун между сигналами, баров M15 (по умолчанию 6)")
+    parser.add_argument("--sr-zone-pts", type=float, help="Переопределить зону реакции у уровня, pts (по умолчанию 300)")
+    parser.add_argument("--pin-bar-ratio", type=float, help="Переопределить требуемое соотношение тень/тело для пинбара (по умолчанию 2.0)")
+    parser.add_argument("--ema-period", type=int, help="Переопределить период EMA тренда (по умолчанию 200)")
     parser.add_argument("--ai-review", action="store_true",
                          help="Сразу после бэктеста отправить статистику на анализ Claude (нужен ANTHROPIC_API_KEY в .env)")
     args = parser.parse_args()
@@ -239,6 +243,14 @@ if __name__ == "__main__":
         params.rr = args.rr
     if args.min_bonus is not None:
         params.min_bonus = args.min_bonus
+    if args.cooldown_bars is not None:
+        params.cooldown_bars = args.cooldown_bars
+    if args.sr_zone_pts is not None:
+        params.sr_zone_pts = args.sr_zone_pts
+    if args.pin_bar_ratio is not None:
+        params.pin_bar_ratio = args.pin_bar_ratio
+    if args.ema_period is not None:
+        params.ema_period = args.ema_period
 
     run_backtest(args.csv, start_dt, end_dt, params)
 
