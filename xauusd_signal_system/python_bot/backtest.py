@@ -28,6 +28,7 @@ import argparse
 import bisect
 import csv as csv_module
 import json
+from collections import Counter
 from datetime import datetime, timedelta
 
 from strategy import StrategyParams, XAUStrategy
@@ -115,24 +116,40 @@ def simulate_outcome(setup, m15: list[dict], entry_idx: int) -> dict:
     return {"result": "timeout", "bars_held": MAX_HOLD_BARS}
 
 
+def detect_entry_tf_minutes(candles: list[dict]) -> int:
+    """Автоопределение реальной длины бара (M15/M5/...) по данным, а не по имени файла."""
+    deltas = [
+        round((candles[i]["time"] - candles[i - 1]["time"]).total_seconds() / 60)
+        for i in range(1, min(500, len(candles)))
+    ]
+    deltas = [d for d in deltas if 0 < d <= 60]  # отсекаем гэпы выходных/праздников
+    return Counter(deltas).most_common(1)[0][0] if deltas else 15
+
+
 def run_backtest(csv_path: str, start: datetime | None, end: datetime | None, params: StrategyParams | None = None) -> None:
+    params = params or StrategyParams()
     print(f"Загружаю {csv_path}...")
     full_m15 = load_mt5_csv(csv_path)
     if start:
         full_m15 = [c for c in full_m15 if c["time"] >= start]
     if end:
         full_m15 = [c for c in full_m15 if c["time"] <= end]
-    if len(full_m15) < H1_COUNT * 4:
-        raise SystemExit(f"Слишком мало данных ({len(full_m15)} M15-баров) — нужно минимум ~{H1_COUNT * 4} для прогрева EMA200")
 
-    print(f"M15 баров: {len(full_m15)} ({full_m15[0]['time']} — {full_m15[-1]['time']})")
+    detected_tf = detect_entry_tf_minutes(full_m15)
+    params.entry_tf_minutes = detected_tf
+    bars_per_h1 = max(1, 60 // detected_tf)
+    if len(full_m15) < H1_COUNT * bars_per_h1:
+        raise SystemExit(f"Слишком мало данных ({len(full_m15)} баров по {detected_tf} мин) — нужно минимум ~{H1_COUNT * bars_per_h1} для прогрева EMA200")
+
+    print(f"Обнаружен таймфрейм входа: M{detected_tf}")
+    print(f"Баров: {len(full_m15)} ({full_m15[0]['time']} — {full_m15[-1]['time']})")
     print("Строю H1/H4 из M15...")
     full_h1 = resample(full_m15, 60)
     full_h4 = resample(full_m15, 240)
     h1_close_times = [c["time"] + timedelta(minutes=60) for c in full_h1]
     h4_close_times = [c["time"] + timedelta(minutes=240) for c in full_h4]
 
-    strategy = XAUStrategy(params or StrategyParams())
+    strategy = XAUStrategy(params)
     trades = []
 
     print("Прогоняю стратегию по истории (может занять несколько минут)...")

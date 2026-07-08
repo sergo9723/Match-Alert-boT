@@ -35,6 +35,8 @@ from typing import Optional
 
 @dataclass
 class StrategyParams:
+    entry_tf_minutes: int = 15  # реальная длина бара входного таймфрейма (M15=15, M5=5) — влияет на кулдаун
+
     ema_period: int = 200
     flat_atr_mult: float = 0.6
 
@@ -189,7 +191,7 @@ class XAUStrategy:
     def _cooldown_ok(self, last_time: Optional[datetime], now: datetime) -> bool:
         if last_time is None:
             return True
-        return now - last_time >= timedelta(minutes=15 * self.p.cooldown_bars)
+        return now - last_time >= timedelta(minutes=self.p.entry_tf_minutes * self.p.cooldown_bars)
 
     def evaluate(self, h4: list[dict], h1: list[dict], m15: list[dict]) -> Optional[Setup]:
         p = self.p
