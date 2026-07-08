@@ -82,6 +82,10 @@ class StrategyParams:
 
     pip_size: float = 0.01  # syminfo.mintick аналог: 1 pt для XAUUSD = 0.01
 
+    # Опциональный фильтр по часам (час времени свечи, см. предупреждение
+    # про часовой пояс сервера MT5 в README) — None = без ограничения по времени.
+    allowed_hours: frozenset[int] | None = None
+
 
 @dataclass
 class Setup:
@@ -378,8 +382,10 @@ class XAUStrategy:
         bonus_long = (1 if vol_ok else 0) + (1 if double_bottom else 0) + (1 if in_bull_fvg else 0)
         bonus_short = (1 if vol_ok else 0) + (1 if double_top else 0) + (1 if in_bear_fvg else 0)
 
-        long_ok = core_long and not double_top and not bearish_choch and bonus_long >= p.min_bonus
-        short_ok = core_short and not double_bottom and not bullish_choch and bonus_short >= p.min_bonus
+        hour_ok = p.allowed_hours is None or now.hour in p.allowed_hours
+
+        long_ok = core_long and not double_top and not bearish_choch and bonus_long >= p.min_bonus and hour_ok
+        short_ok = core_short and not double_bottom and not bullish_choch and bonus_short >= p.min_bonus and hour_ok
 
         long_signal = long_ok and self._cooldown_ok(self.last_long_time, now)
         short_signal = short_ok and self._cooldown_ok(self.last_short_time, now)
