@@ -164,6 +164,7 @@ def run_backtest(csv_path: str, start: datetime | None, end: datetime | None, pa
 
     print_report(trades, full_m15)
     write_trades_csv(trades, "backtest_trades.csv")
+    return trades
 
 
 def print_report(trades: list[dict], m15: list[dict]) -> None:
@@ -224,6 +225,8 @@ if __name__ == "__main__":
                          help="Отключить слабый триггер 'Отбой от S/R', оставить только Liquidity Sweep")
     parser.add_argument("--rr", type=float, help="Переопределить R:R (по умолчанию 2.0)")
     parser.add_argument("--min-bonus", type=int, help="Переопределить мин. бонус-очков (по умолчанию 0)")
+    parser.add_argument("--ai-review", action="store_true",
+                         help="Сразу после бэктеста отправить статистику на анализ Claude (нужен ANTHROPIC_API_KEY в .env)")
     args = parser.parse_args()
 
     start_dt = datetime.strptime(args.start, "%Y-%m-%d") if args.start else None
@@ -238,3 +241,18 @@ if __name__ == "__main__":
         params.min_bonus = args.min_bonus
 
     run_backtest(args.csv, start_dt, end_dt, params)
+
+    if args.ai_review:
+        from ai_review import ask_claude_review, load_backtest_csv
+
+        print("\nЗапрашиваю анализ у Claude по итогам бэктеста...")
+        stats = load_backtest_csv("backtest_trades.csv")
+        review = ask_claude_review(stats)
+        print("\n" + "=" * 60)
+        print(review)
+        print("=" * 60)
+        with open("ai_review_report.md", "w", encoding="utf-8") as f:
+            f.write("# ИИ-разбор бэктеста\n\n")
+            f.write("## Статистика\n\n```json\n" + json.dumps(stats, ensure_ascii=False, indent=2) + "\n```\n\n")
+            f.write("## Анализ Claude\n\n" + review + "\n")
+        print("\nОтчёт сохранён в ai_review_report.md")
