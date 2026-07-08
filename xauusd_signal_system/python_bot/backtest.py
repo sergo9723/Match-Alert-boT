@@ -247,6 +247,7 @@ if __name__ == "__main__":
     parser.add_argument("--pin-bar-ratio", type=float, help="Переопределить требуемое соотношение тень/тело для пинбара (по умолчанию 2.0)")
     parser.add_argument("--ema-period", type=int, help="Переопределить период EMA тренда (по умолчанию 200)")
     parser.add_argument("--allowed-hours", help="Часы (в часовом поясе времени свечей из CSV), в которые разрешены сигналы, напр. '15,16,19,20,21'")
+    parser.add_argument("--fomc-blackout", help="Заблокировать вход в указанные часы в дни FOMC, напр. '21,22,23' (даты — из news_calendar.FOMC_DATES)")
     parser.add_argument("--ai-review", action="store_true",
                          help="Сразу после бэктеста отправить статистику на анализ Claude (нужен ANTHROPIC_API_KEY в .env)")
     args = parser.parse_args()
@@ -271,6 +272,10 @@ if __name__ == "__main__":
         params.ema_period = args.ema_period
     if args.allowed_hours is not None:
         params.allowed_hours = frozenset(int(h.strip()) for h in args.allowed_hours.split(","))
+    if args.fomc_blackout is not None:
+        from news_calendar import fomc_blackout
+        hours = tuple(int(h.strip()) for h in args.fomc_blackout.split(","))
+        params.news_blackout = fomc_blackout(hours)
 
     run_backtest(args.csv, start_dt, end_dt, params)
 

@@ -86,6 +86,10 @@ class StrategyParams:
     # про часовой пояс сервера MT5 в README) — None = без ограничения по времени.
     allowed_hours: frozenset[int] | None = None
 
+    # Опциональная блокировка новых входов в конкретные (дата, час) — напр.
+    # час выхода решения ФРС (см. news_calendar.py). None = без блокировки.
+    news_blackout: frozenset[tuple] | None = None
+
 
 @dataclass
 class Setup:
@@ -383,6 +387,8 @@ class XAUStrategy:
         bonus_short = (1 if vol_ok else 0) + (1 if double_top else 0) + (1 if in_bear_fvg else 0)
 
         hour_ok = p.allowed_hours is None or now.hour in p.allowed_hours
+        blackout_ok = p.news_blackout is None or (now.date(), now.hour) not in p.news_blackout
+        hour_ok = hour_ok and blackout_ok
 
         long_ok = core_long and not double_top and not bearish_choch and bonus_long >= p.min_bonus and hour_ok
         short_ok = core_short and not double_bottom and not bullish_choch and bonus_short >= p.min_bonus and hour_ok
