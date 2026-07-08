@@ -107,7 +107,7 @@ liquidity sweep, свечные паттерны, FVG, CHoCH). Вот стати
     client = Anthropic(api_key=ANTHROPIC_API_KEY)
     resp = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=800,
+        max_tokens=2000,  # русский текст токенизируется плотнее английского — 800 обрезало ответ на полуслове
         messages=[{"role": "user", "content": prompt}],
     )
     text_blocks = [b.text for b in resp.content if getattr(b, "type", None) == "text"]
