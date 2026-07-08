@@ -1,26 +1,30 @@
-// © 2026 XAUUSD TA Master v6.0 — Confluence Scanner
-// Новая система с нуля, построена строго по 12 блокам обучения трейдингу:
+// © 2026 XAUUSD TA Master v6.1 — Confluence Scanner + SMC
+// Новая система с нуля, построена строго по 12 блокам обучения трейдингу,
+// плюс SMC-концепции (ложные пробои/ликвидность, imbalance, слом структуры):
 //   Блок 1  — Японские свечи (тело/тени)                -> body/upperShadow/lowerShadow
 //   Блок 2  — Таймфреймы сверху вниз                     -> H4 (макро) -> H1 (структура/уровни) -> вход TF
 //   Блок 3  — Тренды (вверх/вниз/боковик)                -> trendState
 //   Блок 4  — Уровни поддержки/сопротивления              -> pivot H1, ближайший уровень
-//   Блок 5  — Пробой и ретест                             -> state-machine breakout->retest
+//   Блок 5  — Пробой и ретест + Liquidity Sweep           -> state-machine breakout->retest,
+//                                                             sweep уровня тенью с закрытием обратно (ложный пробой)
 //   Блок 6  — Объём                                       -> volOK (бонус к уверенности)
 //   Блок 7  — EMA200 H4+H1                                -> часть тренда (Блок 3)
 //   Блок 8  — Свечные паттерны (пинбар/поглощение/доджи)  -> обязательное подтверждение входа
-//   Блок 9  — Графические фигуры (двойная вершина/дно)    -> вето против сигнала при развороте
+//   Блок 9  — Графические фигуры + SMC                    -> двойная вершина/дно (вето),
+//                                                             FVG/imbalance (бонус), CHoCH (вето при сломе структуры)
 //   Блок 10 — Точка входа + SL + TP (ATR-based)           -> entry/sl/tp
 //
 // Логика входа = ОДНА связная идея сделки, а не 5 случайных совпадений:
-//   тренд согласован  AND  триггер (пробой+ретест ИЛИ отбой от уровня по тренду)
-//   AND свечное подтверждение  AND  нет противоположной фигуры (дв.вершина/дно)
-//   Объём — бонус к оценке уверенности, не жёсткое условие.
+//   тренд согласован  AND  триггер (пробой+ретест ИЛИ liquidity sweep/отбой от уровня по тренду)
+//   AND свечное подтверждение  AND  нет противоположной фигуры (дв.вершина/дно)  AND  нет CHoCH против сделки
+//   Объём и FVG — бонус к оценке уверенности, не жёсткое условие.
 //
 // Алерт шлёт JSON в message — используется внешним Python-сервисом
 // (webhook_relay.py), который прогоняет сетап через Claude как доп.фильтр
-// и пересылает подтверждённые сигналы в Telegram.
+// и пересылает подтверждённые сигналы в Telegram. Сама индикация на графике
+// (стрелки/таблица/TP-SL линии) работает и без вебхука, на бесплатном плане.
 //@version=6
-indicator("XAUUSD TA Master v6.0 (Confluence)", overlay=true, max_lines_count=500, max_labels_count=500)
+indicator("XAUUSD TA Master v6.1 (Confluence + SMC)", overlay=true, max_lines_count=500, max_labels_count=500)
 
 // ═══════════════════════════════════════════════════════════════════
 // ВХОДНЫЕ ПАРАМЕТРЫ
@@ -48,8 +52,9 @@ grp_candle = "═══ БЛОК 1+8: СВЕЧНЫЕ ПАТТЕРНЫ ═══"
 inpPinBarRatio  = input.float(2.0, "Pin Bar тень/тело", minval=1.5, group=grp_candle)
 inpDojiMaxBody  = input.float(0.1, "Doji: тело ≤ X × диапазон", minval=0.02, step=0.01, group=grp_candle)
 
-grp_pattern = "═══ БЛОК 9: ГРАФИЧЕСКИЕ ФИГУРЫ ═══"
+grp_pattern = "═══ БЛОК 9: ГРАФИЧЕСКИЕ ФИГУРЫ + SMC ═══"
 inpPatternTolPts = input.int(250, "Допуск равенства вершин/дна (pts)", minval=50, group=grp_pattern)
+inpFVGLookback   = input.int(30, "Баров назад для поиска FVG", minval=5, maxval=100, group=grp_pattern, tooltip="Imbalance / Fair Value Gap — бонус к уверенности")
 
 grp_entry = "═══ БЛОК 10: ВХОД / SL / TP ═══"
 inpUseATR       = input.bool(true, "SL/TP по ATR (рекомендую)", group=grp_entry)
@@ -58,7 +63,7 @@ inpATR_SLmult   = input.float(1.5, "SL = ATR ×", minval=0.5, step=0.1, group=gr
 inpRR           = input.float(2.0, "TP = SL × R:R", minval=1.0, step=0.1, group=grp_entry)
 inpSL_pts       = input.int(500, "SL фикс. (pts, если ATR выкл.)", minval=100, group=grp_entry)
 inpTP_pts       = input.int(1000, "TP фикс. (pts, если ATR выкл.)", minval=100, group=grp_entry)
-inpMinBonus     = input.int(0, "Мин. бонус-очков (объём/фигура)", minval=0, maxval=2, group=grp_entry, tooltip="0 = входить сразу по ядру сетапа, 1-2 = требовать доп.подтверждения")
+inpMinBonus     = input.int(0, "Мин. бонус-очков (объём/двойное дно-вершина/FVG)", minval=0, maxval=3, group=grp_entry, tooltip="0 = входить сразу по ядру сетапа, 1-3 = требовать доп.подтверждения")
 inpShowTPSL     = input.bool(true, "Показывать линии TP/SL", group=grp_entry)
 inpTPSLdur      = input.int(20, "Длина линий (баров)", minval=5, maxval=50, group=grp_entry)
 inpMaxSignals   = input.int(5, "Макс сигналов на графике", minval=1, maxval=20, group=grp_entry)
@@ -201,15 +206,25 @@ if barstate.isconfirmed
         pendingDir := -1
         pendingBreakoutBar := bar_index
 
+// Liquidity sweep (SMC, "ложный пробой"/стоп-хант): цена протыкает уровень
+// тенью (собирает стопы/ликвидность за ним), но ЗАКРЫВАЕТСЯ обратно за
+// уровнем — признак ложного пробоя и разворота в сторону тренда, сильнее
+// простого "цена рядом с уровнем", поэтому приоритетнее.
+sweptSupport    = not na(nearestSupport) and low < nearestSupport and close > nearestSupport
+sweptResistance = not na(nearestResistance) and high > nearestResistance and close < nearestResistance
+
+liquiditySweepLong  = trendUp and sweptSupport and candleBull
+liquiditySweepShort = trendDown and sweptResistance and candleBear
+
 // Второй тип триггера — отбой от уровня ПО ТРЕНДУ (покупка от поддержки в аптренде и т.п.)
-bounceLongTrigger  = trendUp and priceAtSupport and candleBull
-bounceShortTrigger = trendDown and priceAtResistance and candleBear
+bounceLongTrigger  = liquiditySweepLong or (trendUp and priceAtSupport and candleBull)
+bounceShortTrigger = liquiditySweepShort or (trendDown and priceAtResistance and candleBear)
 
 setupLongTrigger  = retestLongTrigger or bounceLongTrigger
 setupShortTrigger = retestShortTrigger or bounceShortTrigger
 
-setupLongType  = retestLongTrigger ? "Пробой+Ретест" : bounceLongTrigger ? "Отбой от S/R" : "нет"
-setupShortType = retestShortTrigger ? "Пробой+Ретест" : bounceShortTrigger ? "Отбой от S/R" : "нет"
+setupLongType  = retestLongTrigger ? "Пробой+Ретест" : liquiditySweepLong ? "Liquidity Sweep" : bounceLongTrigger ? "Отбой от S/R" : "нет"
+setupShortType = retestShortTrigger ? "Пробой+Ретест" : liquiditySweepShort ? "Liquidity Sweep" : bounceShortTrigger ? "Отбой от S/R" : "нет"
 
 // ═══════════════════════════════════════════════════════════════════
 // БЛОК 8: СВЕЧНЫЕ ПАТТЕРНЫ — Pin Bar / Engulfing / Doji
@@ -253,7 +268,28 @@ rangeNow  = ta.highest(high, 20) - ta.lowest(low, 20)
 rangePrev = ta.highest(high, 20)[20] - ta.lowest(low, 20)[20]
 triangleSqueeze = rangePrev > 0 and rangeNow < rangePrev * 0.7
 
-chartPatternNote = doubleTopActive ? "⚠ Дв.вершина" : doubleBottomActive ? "⚠ Дв.дно" : triangleSqueeze ? "Сжатие/треугольник" : "нет"
+// Imbalance / Fair Value Gap — 3-свечная модель непокрытого гэпа. Бонус к
+// уверенности, если цена сейчас внутри недавней непокрытой зоны.
+bool inBullFVG = false
+bool inBearFVG = false
+for k = 0 to inpFVGLookback - 1
+    aHigh = high[k + 2]
+    aLow  = low[k + 2]
+    cHigh = high[k]
+    cLow  = low[k]
+    if cLow > aHigh and close >= aHigh and close <= cLow
+        inBullFVG := true
+    if cHigh < aLow and close <= aLow and close >= cHigh
+        inBearFVG := true
+
+// CHoCH (Change of Character) — слом структуры тренда на H1: структура
+// делала растущие лои (HL), но цена только что пробила последний лой вниз
+// (bearishChoch) — или зеркально для bullishChoch. Ранний сигнал разворота,
+// который EMA200 ещё не подтвердила.
+bearishChoch = array.size(pivotLows) >= 2 and array.get(pivotLows, array.size(pivotLows) - 1) > array.get(pivotLows, array.size(pivotLows) - 2) and close < array.get(pivotLows, array.size(pivotLows) - 1)
+bullishChoch = array.size(pivotHighs) >= 2 and array.get(pivotHighs, array.size(pivotHighs) - 1) < array.get(pivotHighs, array.size(pivotHighs) - 2) and close > array.get(pivotHighs, array.size(pivotHighs) - 1)
+
+chartPatternNote = doubleTopActive ? "⚠ Дв.вершина" : doubleBottomActive ? "⚠ Дв.дно" : bearishChoch ? "⚠ CHoCH↓" : bullishChoch ? "⚠ CHoCH↑" : inBullFVG or inBearFVG ? "FVG" : triangleSqueeze ? "Сжатие/треугольник" : "нет"
 
 // ═══════════════════════════════════════════════════════════════════
 // СБОРКА СЕТАПА — ядро (обязательное) + бонусы (доп.уверенность)
@@ -262,11 +298,11 @@ chartPatternNote = doubleTopActive ? "⚠ Дв.вершина" : doubleBottomAct
 coreLong  = trendUp   and setupLongTrigger  and candleDir == 1
 coreShort = trendDown and setupShortTrigger and candleDir == -1
 
-bonusLong  = (volOK ? 1 : 0) + (doubleBottomActive ? 1 : 0)
-bonusShort = (volOK ? 1 : 0) + (doubleTopActive ? 1 : 0)
+bonusLong  = (volOK ? 1 : 0) + (doubleBottomActive ? 1 : 0) + (inBullFVG ? 1 : 0)
+bonusShort = (volOK ? 1 : 0) + (doubleTopActive ? 1 : 0) + (inBearFVG ? 1 : 0)
 
-vetoLong  = doubleTopActive
-vetoShort = doubleBottomActive
+vetoLong  = doubleTopActive or bearishChoch
+vetoShort = doubleBottomActive or bullishChoch
 
 longSetupOK  = coreLong  and not vetoLong  and bonusLong  >= inpMinBonus
 shortSetupOK = coreShort and not vetoShort and bonusShort >= inpMinBonus
@@ -385,7 +421,7 @@ var table t = table.new(tablePos, 2, 18, bgcolor=color.new(color.black, 20), bor
 if inpShowTable and barstate.islast
     table.clear(t, 0, 0, 1, 17)
 
-    table.cell(t, 0, 0, "═══ XAUUSD TA v6.0 ═══", text_color=color.aqua, text_size=size.normal)
+    table.cell(t, 0, 0, "═══ XAUUSD TA v6.1 ═══", text_color=color.aqua, text_size=size.normal)
     table.merge_cells(t, 0, 0, 1, 0)
 
     table.cell(t, 0, 1, "Цена:", text_color=color.silver, text_size=size.small)
