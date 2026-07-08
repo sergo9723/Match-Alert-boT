@@ -39,7 +39,7 @@ MAX_HOLD_BARS = 200  # ~50 часов на M15 — если за это врем
 
 
 def load_mt5_csv(path: str) -> list[dict]:
-    with open(path, "r", encoding="utf-8-sig") as f:
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
         sample = f.readline()
         delimiter = "\t" if "\t" in sample else ("," if "," in sample else None)
         if delimiter is None:
