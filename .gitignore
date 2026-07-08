@@ -3,3 +3,6 @@ __pycache__/
 .env
 signals_log.jsonl
 venv/
+backtest_trades.csv
+ai_review_report.md
+*.csv
