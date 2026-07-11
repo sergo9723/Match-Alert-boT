@@ -62,7 +62,8 @@ def run(csv_path: str, target_pts: float, params: StrategyParams):
         setup = strat.evaluate(h4_window, h1_window, m15_window)
         if setup is not None:
             outcome = simulate_early_tp(setup, full_m15, i, target_pts, params.pip_size)
-            trades.append({"time": setup.time, "dir": setup.direction, **outcome})
+            sl_dist = abs(setup.entry - setup.sl)
+            trades.append({"time": setup.time, "dir": setup.direction, "sl_dist": sl_dist, **outcome})
 
         if i % 20000 == 0 and i > 0:
             print(f"  {i}/{total}, сделок пока: {len(trades)}")
@@ -80,6 +81,15 @@ def run(csv_path: str, target_pts: float, params: StrategyParams):
     print(f"Всего сигналов: {len(trades)} | сделок/день: {len(trades)/span_days:.2f}")
     print(f"Win: {len(wins)}  Loss: {len(losses)}  Timeout: {len(timeouts)}")
     print(f"Win Rate: {win_rate:.1f}%")
+    if losses:
+        import statistics
+        avg_sl = statistics.mean(t["sl_dist"] for t in losses)
+        win_amt = target_pts * params.pip_size
+        expectancy = (len(wins) * win_amt - len(losses) * avg_sl) / len(decided)
+        print(f"Средний SL по убыточным: ${avg_sl:.2f}/унция")
+        print(f"Тейк по выигрышным: ${win_amt:.2f}/унция (фикс.)")
+        print(f"Экспектанси: {expectancy:+.3f}$/унция за сделку "
+              f"(факт. R:R = {win_amt/avg_sl:.2f}, нужен винрейт для безубытка: {avg_sl/(avg_sl+win_amt)*100:.1f}%)")
     return trades
 
 
