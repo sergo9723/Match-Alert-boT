@@ -12,6 +12,15 @@
 # Если ругается на "выполнение скриптов отключено" — один раз:
 #   Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 
+# BUG-FIX (Windows, 17.07): PowerShell-консоль по умолчанию читает
+# вывод через старую кодировку (cp1251/cp866), а Python пишет в UTF-8 —
+# без этого текст с кириллицей/эмодзи превращается в кракозябры (хотя
+# сам бот при этом работает нормально, это чисто отображение).
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    chcp 65001 | Out-Null
+} catch {}
+
 $ChromePort = 9222
 $ProfileDir = "$env:USERPROFILE\.selenium-chrome-7777"
 $BotDir     = Split-Path -Parent $MyInvocation.MyCommand.Path
