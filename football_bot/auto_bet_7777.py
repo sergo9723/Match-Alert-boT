@@ -45,6 +45,7 @@ try:
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
     from selenium.webdriver.common.action_chains import ActionChains
     SELENIUM_AVAILABLE = True
 except ImportError:
@@ -471,14 +472,74 @@ def _extract_odds_from_text(text: str) -> Optional[float]:
 
 
 # ═══════════════════════════════════════════════════════════════
-# КУПОН: СУММА + ПОДТВЕРЖДЕНИЕ (только НЕ в dry-run)
+# КУПОН: РАЗВОРОТ + СУММА + ПОДТВЕРЖДЕНИЕ (только НЕ в dry-run)
 # ═══════════════════════════════════════════════════════════════
+#
+# Реальный флоу подтверждён скриншотами пользователя (7777.md,
+# 17.07):
+#   1. Клик по коэффициенту -> внизу справа появляется СВЁРНУТЫЙ
+#      купон: "N Выбор / Итог. коэф: X" + стрелка-шеврон вверх.
+#      Поля суммы в свёрнутом виде НЕТ.
+#   2. Клик по шеврону -> купон разворачивается: заголовок "Ставка",
+#      вкладки "Ординарная/Экспресс/Система", инфо об исходе, поле
+#      ввода суммы с плейсхолдером "MDL", быстрые кнопки НАДБАВОК
+#      "+100 / +500 / +1000" (это ДОБАВКА к текущей сумме, а НЕ
+#      пресет ставки — под 5 лей их использовать нельзя), строка
+#      "Возможный выигрыш: 0.00 MDL", кнопка "Принять изменения".
+#   3. Сумму (5 лей) нужно вписать в поле вручную и нажать
+#      "Принять изменения".
+#
+# ⚠️ TODO-CALIBRATE: точные CSS-классы шеврона/поля/кнопки всё ещё
+# не подтверждены discover-дампом — ниже эвристика по тексту/атрибутам,
+# рабочая по скриншотам, но нужно сверить перед первым live-кликом.
+
+def _expand_betslip_if_collapsed(driver) -> bool:
+    """
+    Разворачивает свёрнутый купон кликом по шеврону, если поле суммы
+    ещё не видно. Возвращает True, если купон в развёрнутом виде
+    (было изначально или удалось развернуть).
+    """
+    try:
+        betslip = driver.find_element(By.XPATH, '//*[@data-widget="betslip"]')
+    except Exception:
+        return False
+
+    try:
+        if betslip.find_elements(By.XPATH, ".//input"):
+            return True  # уже развёрнут
+    except Exception:
+        pass
+
+    try:
+        toggles = betslip.find_elements(
+            By.XPATH,
+            ".//*[contains(@class,'chevron') or contains(@class,'arrow') "
+            "or contains(@class,'expand') or contains(@class,'collapse') "
+            "or contains(@class,'toggle') or self::svg or self::button "
+            "or @role='button']"
+        )
+        for t in toggles:
+            try:
+                t.click()
+                time.sleep(1)
+                if betslip.find_elements(By.XPATH, ".//input"):
+                    log("Купон развёрнут кликом по шеврону.")
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    log("⚠️ Не удалось развернуть купон (шеврон не найден/не сработал).")
+    return False
+
 
 def set_stake_and_confirm(driver, amount: float) -> Dict[str, Any]:
     """
-    ⚠️ TODO-CALIBRATE ПОЛНОСТЬЮ — это наименее проверенная часть.
-    Ищет купон (data-widget="betslip"), в нём — числовое поле ввода
-    и кнопку подтверждения по тексту. НЕ вызывается в DRY_RUN.
+    ⚠️ TODO-CALIBRATE — сверить перед первым live-кликом (см. комментарий
+    выше). Разворачивает купон, находит поле суммы (плейсхолдер/подпись
+    "MDL" — НЕ кнопки +100/+500/+1000, это надбавки, а не пресеты),
+    вписывает сумму вручную и жмёт "Принять изменения".
 
     Возвращает {"status": "CONFIRMED"|"FAILED", "detail": str}
     """
@@ -487,30 +548,49 @@ def set_stake_and_confirm(driver, amount: float) -> Dict[str, Any]:
     except Exception as e:
         return {"status": "FAILED", "detail": f"купон не найден: {e}"}
 
+    if not _expand_betslip_if_collapsed(driver):
+        return {"status": "FAILED", "detail": "купон свёрнут, не смог развернуть (нужна калибровка шеврона)"}
+
     try:
         inputs = betslip.find_elements(By.TAG_NAME, "input")
         stake_input = None
+        # Сначала пробуем найти именно поле суммы по плейсхолдеру "MDL"
         for inp in inputs:
-            itype = (inp.get_attribute("type") or "").lower()
-            if itype in ("number", "text", ""):
+            placeholder = (inp.get_attribute("placeholder") or "").upper()
+            if "MDL" in placeholder:
                 stake_input = inp
                 break
+        # Фолбэк: любое текстовое/числовое поле (НЕ поля точного счёта
+        # "Точный счёт" — те лежат вне купона, так что здесь безопасно)
         if stake_input is None:
-            return {"status": "FAILED", "detail": "поле суммы не найдено в купоне"}
-        stake_input.clear()
+            for inp in inputs:
+                itype = (inp.get_attribute("type") or "").lower()
+                if itype in ("number", "text", ""):
+                    stake_input = inp
+                    break
+        if stake_input is None:
+            return {"status": "FAILED", "detail": "поле суммы (MDL) не найдено в развёрнутом купоне"}
+
+        stake_input.click()
+        # .clear() часто не триггерит onChange у React-инпутов —
+        # выделяем всё и удаляем через клавиатуру, потом вводим заново.
+        stake_input.send_keys(Keys.CONTROL, "a")
+        stake_input.send_keys(Keys.DELETE)
         stake_input.send_keys(str(amount))
+        time.sleep(0.5)
     except Exception as e:
         return {"status": "FAILED", "detail": f"не смог ввести сумму: {e}"}
 
     try:
         buttons = betslip.find_elements(By.XPATH, ".//button | .//*[@role='button']")
-        confirm_words = ["подтвердить", "поставить", "confirm", "place bet", "ok"]
+        confirm_words = ["принять изменения", "подтвердить", "поставить",
+                          "confirm", "place bet", "apply", "ok"]
         for btn in buttons:
             txt = (btn.text or "").strip().lower()
             if any(w in txt for w in confirm_words):
                 btn.click()
                 return {"status": "CONFIRMED", "detail": f"нажал кнопку '{txt}'"}
-        return {"status": "FAILED", "detail": "кнопка подтверждения не найдена"}
+        return {"status": "FAILED", "detail": "кнопка 'Принять изменения' не найдена"}
     except Exception as e:
         return {"status": "FAILED", "detail": f"ошибка подтверждения: {e}"}
 
