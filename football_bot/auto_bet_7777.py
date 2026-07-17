@@ -100,8 +100,11 @@ LOGGED_IN_MARKERS = [
     "пополнить", "пополнение", "депозит", "вывод", "выход", "мой профиль",
     "личный кабинет", "баланс", "леев", "mdl", "кабинет", "мои ставки",
 ]
+# "регистрация" НАМЕРЕННО убрана: в шапке 7777.md всегда висит пункт
+# "РЕГИСТРАЦИЯ КОДА" при любом состоянии — из-за него детект вечно
+# давал UNKNOWN (см. калибровку inspect_7777.py 17.07).
 LOGGED_OUT_MARKERS = [
-    "войти", "вход", "регистрация", "log in", "sign in", "авторизация",
+    "войти", "вход", "log in", "sign in", "авторизация", "авторизуйтесь",
 ]
 
 # ═══════════════════════════════════════════════════════════════
@@ -226,11 +229,13 @@ def detect_login_state(driver) -> str:
         return "UNKNOWN"
     if not text:
         return "UNKNOWN"
-    out_hit = any(m in text for m in LOGGED_OUT_MARKERS)
+    # Приоритет у IN: явный признак залогина (баланс/леев/пополнение)
+    # решает, даже если в шапке нашлось что-то "входное".
     in_hit = any(m in text for m in LOGGED_IN_MARKERS)
-    if in_hit and not out_hit:
+    out_hit = any(m in text for m in LOGGED_OUT_MARKERS)
+    if in_hit:
         return "IN"
-    if out_hit and not in_hit:
+    if out_hit:
         return "OUT"
     return "UNKNOWN"
 

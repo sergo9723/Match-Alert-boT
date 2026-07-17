@@ -42,15 +42,50 @@ OUT_DIR = os.path.join("data", "inspect")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # Слова, по которым угадываем состояние логина (по видимому тексту).
-# Если ты ЗАЛОГИНЕН — обычно виден баланс/пополнить/выход/кабинет.
+# КАЛИБРОВКА 17.07 (два keepalive-теста подряд дали UNKNOWN на ВСЕХ
+# замерах, хотя пользователь был залогинен): реальная причина —
+# в шапке 7777.md ВСЕГДА висит пункт меню "РЕГИСТРАЦИЯ КОДА", и слово
+# "регистрация" из старого списка OUT совпадало с ним при ЛЮБОМ
+# состоянии → out_hit=True всегда → вечный UNKNOWN. Убрали "регистрация"
+# из OUT (это НЕ признак разлогина на этом сайте) и добавили реальные
+# слова залогиненной шапки со скриншотов: "пополнение" (кнопка) и
+# "леев" (валюта баланса, "0.29 леев").
 LOGGED_IN_MARKERS = [
-    "пополнить", "депозит", "вывод", "выход", "мой профиль",
-    "личный кабинет", "баланс", "mdl", "кабинет", "мои ставки",
+    "пополнить", "пополнение", "депозит", "вывод", "выход", "мой профиль",
+    "личный кабинет", "баланс", "леев", "mdl", "кабинет", "мои ставки",
 ]
-# Если ВЫШЕЛ — обычно видна кнопка входа/регистрации.
+# Если ВЫШЕЛ — видна кнопка входа. "регистрация" НАМЕРЕННО убрана —
+# она есть в шапке всегда ("РЕГИСТРАЦИЯ КОДА") и не означает разлогин.
 LOGGED_OUT_MARKERS = [
-    "войти", "вход", "регистрация", "log in", "sign in", "авторизация",
+    "войти", "вход", "log in", "sign in", "авторизация", "авторизуйтесь",
 ]
+
+
+def collect_all_text(driver) -> str:
+    """Видимый текст всей страницы, включая вложенные iframe.
+    Если виджет/шапка рендерятся во фрейме, чтение только верхнего
+    body его не увидит — это тоже могло давать вечный UNKNOWN."""
+    chunks = []
+    try:
+        chunks.append(driver.find_element("tag name", "body").text)
+    except Exception:
+        pass
+    try:
+        frames = driver.find_elements("tag name", "iframe")
+    except Exception:
+        frames = []
+    for fr in frames:
+        try:
+            driver.switch_to.frame(fr)
+            chunks.append(driver.find_element("tag name", "body").text)
+        except Exception:
+            pass
+        finally:
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+    return "\n".join(chunks)
 
 
 def now_str() -> str:
@@ -64,17 +99,17 @@ def attach(port: int = 9222):
 
 
 def detect_login_state(text_lower: str) -> str:
-    """Возвращает 'IN' | 'OUT' | 'UNKNOWN' по видимому тексту страницы."""
-    out_hit = any(m in text_lower for m in LOGGED_OUT_MARKERS)
+    """Возвращает 'IN' | 'OUT' | 'UNKNOWN' по видимому тексту страницы.
+    Приоритет у IN: на 7777.md в шапке всегда есть кое-какие "входные"
+    слова, поэтому наличие явного признака залогина (баланс/леев/
+    пополнение) считаем решающим, даже если параллельно нашлось
+    что-то из OUT-списка."""
     in_hit = any(m in text_lower for m in LOGGED_IN_MARKERS)
-    if in_hit and not out_hit:
+    out_hit = any(m in text_lower for m in LOGGED_OUT_MARKERS)
+    if in_hit:
         return "IN"
-    if out_hit and not in_hit:
+    if out_hit:
         return "OUT"
-    if in_hit and out_hit:
-        # оба есть — обычно это залогинен (кнопка выхода + баланс),
-        # но помечаем как неоднозначно, чтобы ты глазами проверил
-        return "UNKNOWN"
     return "UNKNOWN"
 
 
@@ -124,7 +159,7 @@ def cmd_discover(driver, url: str) -> None:
         driver.get(url)
         time.sleep(6)  # дать виджетам догрузиться
 
-    text = driver.find_element("tag name", "body").text
+    text = collect_all_text(driver)
     login_state = detect_login_state(text.lower())
 
     try:
@@ -203,10 +238,23 @@ def cmd_keepalive(driver, url: str, minutes: int, interval: int) -> None:
             tick += 1
             keep_alive_action(driver)
             try:
-                text = driver.find_element("tag name", "body").text
+                text = collect_all_text(driver)
                 state = detect_login_state(text.lower())
             except Exception as e:
+                text = ""
                 state = f"ERROR:{e}"
+
+            # ДИАГНОСТИКА: на первом замере сохраняем реальный текст
+            # страницы в .txt — если состояние всё ещё UNKNOWN, по нему
+            # сразу видно, какие слова реально есть на странице.
+            if tick == 1:
+                dbg_path = os.path.join(OUT_DIR, f"keepalive_pagetext_{tag}.txt")
+                try:
+                    with open(dbg_path, "w", encoding="utf-8") as dbg:
+                        dbg.write(text or "(пусто — текст со страницы не прочитался)")
+                    print(f"[диагностика] текст страницы сохранён: {dbg_path}")
+                except Exception:
+                    pass
 
             f.write(f"{now_str()},{state}\n")
             f.flush()
