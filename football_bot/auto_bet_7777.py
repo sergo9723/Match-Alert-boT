@@ -383,19 +383,66 @@ MARKET_NAME_BY_TYPE = {
 }
 
 
+# ═══════════════════════════════════════════════════════════════
+# КАЛИБРОВКА 17.07 (discover_20260717_142740, реальный матч с открытым
+# купоном): исправлены поисковые термы Двойного Шанса — реальный текст
+# кнопок "1 или Ничья" / "Ничья или 2", а НЕ "1X"/"X2" (эти буквенные
+# коды на сайте не используются вообще — старые термы никогда бы не
+# сматчились, т.е. авто-ставка на DC был бы гарантированным NOT_FOUND).
+# Для Тотала строка рынка вида "Тотал\nБольше\n2.70\n7.5\nМеньше\n1.40"
+# показывает линию (7.5) ОДИН раз в середине — не при каждой кнопке —
+# поэтому термы теперь просто "больше"/"меньше", а нужная линия
+# сверяется отдельно через _parse_total_line_from_block_text().
+# ═══════════════════════════════════════════════════════════════
+
 def _outcome_search_terms(bet_type: str, line: float, home: str, away: str) -> List[str]:
     """Слова, по которым ищем нужную кнопку исхода внутри рынка."""
     if bet_type == "DC_HOME":
-        return ["1x", "1-x"]
+        return ["1 или ничья"]
     if bet_type == "DC_AWAY":
-        return ["x2", "x-2"]
+        return ["ничья или 2"]
     if bet_type == "BTTS_NO":
-        return ["нет", "no"]
+        return ["нет"]
     if bet_type == "TOTAL_OVER":
-        return [f"больше {line:g}", f"over {line:g}"]
+        return ["больше"]
     if bet_type == "TOTAL_UNDER":
-        return [f"меньше {line:g}", f"under {line:g}"]
+        return ["меньше"]
     return []
+
+
+def _extract_odds_from_text(text: str) -> Optional[float]:
+    """Пытается вытащить число-коэффициент из текста кнопки, напр.
+    'меньше 2.5 1.83' -> 1.83 (последнее число с точкой)."""
+    nums = re.findall(r"\d+\.\d+", text)
+    if not nums:
+        return None
+    try:
+        return float(nums[-1])
+    except Exception:
+        return None
+
+
+def _parse_total_line_from_block_text(text: str) -> Optional[Tuple[float, float, float]]:
+    """
+    Разбирает объединённый текст блока рынка "Тотал"
+    (пример реальных данных: 'Тотал Больше 2.70 7.5 Меньше 1.40')
+    на (коэф_больше, линия, коэф_меньше).
+
+    Линия показывается один раз, между коэффициентом "больше" и
+    словом "меньше" — берём её отсюда, а НЕ из текста самой кнопки
+    (там линии нет).
+    """
+    norm = re.sub(r"\s+", " ", (text or "").strip())
+    m = re.search(
+        r"больше\s+([\d.]+)\s+([\d.]+)\s+меньше\s+([\d.]+)",
+        norm, re.IGNORECASE,
+    )
+    if not m:
+        return None
+    try:
+        return float(m.group(1)), float(m.group(2)), float(m.group(3))
+    except ValueError:
+        return None
 
 
 def find_and_click_outcome(driver, bet_type: str, line: float) -> Dict[str, Any]:
@@ -403,17 +450,16 @@ def find_and_click_outcome(driver, bet_type: str, line: float) -> Dict[str, Any]
     Ищет рынок (market-vis-type-name) и внутри него — кнопку исхода
     по тексту. НЕ кликает в DRY_RUN режиме.
 
-    ⚠️ TODO-CALIBRATE: клик по конкретной "selection"-кнопке внутри
-    рынка сейчас — текстовый поиск среди всех дочерних элементов
-    рынка, а не точный CSS-селектор кнопки. Достаточно надёжно для
-    определения статуса (найдено/заблокировано/не найдено), но перед
-    реальными кликами — сверить с discover-данными.
+    Для Тотала — дополнительно сверяет, что линия на бирже прямо
+    сейчас совпадает с ожидаемой (line), иначе НЕ кликает (защита от
+    ставки на не ту линию, если она успела сдвинуться).
 
-    Возвращает {"status": "FOUND_OPEN"|"BLOCKED"|"NOT_FOUND", "element": ..., "odds_text": str}
+    Возвращает {"status": "FOUND_OPEN"|"BLOCKED"|"NOT_FOUND",
+                 "element": ..., "odds_text": str, "odds": float|None}
     """
     market_name = MARKET_NAME_BY_TYPE.get(bet_type)
     if not market_name:
-        return {"status": "NOT_FOUND", "element": None, "odds_text": ""}
+        return {"status": "NOT_FOUND", "element": None, "odds_text": "", "odds": None}
 
     try:
         market_blocks = driver.find_elements(
@@ -421,15 +467,34 @@ def find_and_click_outcome(driver, bet_type: str, line: float) -> Dict[str, Any]
         )
     except Exception as e:
         log(f"⚠️ Ошибка поиска рынка '{market_name}': {e}")
-        return {"status": "NOT_FOUND", "element": None, "odds_text": ""}
+        return {"status": "NOT_FOUND", "element": None, "odds_text": "", "odds": None}
 
     if not market_blocks:
         log(f"Рынок '{market_name}' не найден на странице.")
-        return {"status": "NOT_FOUND", "element": None, "odds_text": ""}
+        return {"status": "NOT_FOUND", "element": None, "odds_text": "", "odds": None}
 
     terms = [t.lower() for t in _outcome_search_terms(bet_type, line, "", "")]
+    is_total = bet_type in ("TOTAL_OVER", "TOTAL_UNDER")
 
     for block in market_blocks:
+        parsed_odds: Optional[float] = None
+
+        if is_total:
+            try:
+                block_text = block.text
+            except Exception:
+                block_text = ""
+            parsed = _parse_total_line_from_block_text(block_text)
+            if parsed is None:
+                log(f"Тотал: не смог распарсить линию из текста рынка: {block_text!r}")
+                continue
+            odds_over, actual_line, odds_under = parsed
+            if abs(actual_line - line) > 0.01:
+                log(f"Тотал: ожидали линию {line}, на бирже сейчас {actual_line} — "
+                    f"пропускаю (защита от ставки не на ту линию).")
+                continue
+            parsed_odds = odds_over if bet_type == "TOTAL_OVER" else odds_under
+
         try:
             inner_elements = block.find_elements(By.XPATH, ".//*")
         except Exception:
@@ -449,128 +514,105 @@ def find_and_click_outcome(driver, bet_type: str, line: float) -> Dict[str, Any]
                                 or "disabled" in (el.get_attribute("class") or "").lower())
                 except Exception:
                     pass
-                if disabled:
-                    log(f"Исход '{txt}' найден, но ЗАБЛОКИРОВАН (🔒).")
-                    return {"status": "BLOCKED", "element": el, "odds_text": txt}
-                log(f"Исход '{txt}' найден и открыт.")
-                return {"status": "FOUND_OPEN", "element": el, "odds_text": txt}
+
+                # Доп. защита: у ОТКРЫТОГО исхода рядом всегда есть цифра
+                # коэффициента. Если её нет (ни в самом элементе, ни в
+                # родителе) — считаем исход заблокированным, даже если
+                # class-эвристика выше не сработала (частый случай для
+                # 1X/X2 в Двойном Шансе — они у 7777.md почти всегда 🔒).
+                own_odds = _extract_odds_from_text(txt)
+                if own_odds is None and not is_total:
+                    try:
+                        parent_txt = (el.find_element(By.XPATH, "..").text or "").lower()
+                        own_odds = _extract_odds_from_text(parent_txt)
+                    except Exception:
+                        pass
+                if is_total:
+                    own_odds = parsed_odds
+
+                if disabled or own_odds is None:
+                    log(f"Исход '{txt}' найден, но ЗАБЛОКИРОВАН/без коэф. (🔒).")
+                    return {"status": "BLOCKED", "element": el, "odds_text": txt, "odds": None}
+
+                log(f"Исход '{txt}' найден и открыт, коэф≈{own_odds}.")
+                return {"status": "FOUND_OPEN", "element": el, "odds_text": txt, "odds": own_odds}
 
     log(f"Рынок '{market_name}' есть, но нужный исход (line={line}) не найден.")
-    return {"status": "NOT_FOUND", "element": None, "odds_text": ""}
-
-
-def _extract_odds_from_text(text: str) -> Optional[float]:
-    """Пытается вытащить число-коэффициент из текста кнопки, напр.
-    'меньше 2.5 1.83' -> 1.83 (последнее число с точкой)."""
-    nums = re.findall(r"\d+\.\d+", text)
-    if not nums:
-        return None
-    try:
-        return float(nums[-1])
-    except Exception:
-        return None
+    return {"status": "NOT_FOUND", "element": None, "odds_text": "", "odds": None}
 
 
 # ═══════════════════════════════════════════════════════════════
 # КУПОН: РАЗВОРОТ + СУММА + ПОДТВЕРЖДЕНИЕ (только НЕ в dry-run)
 # ═══════════════════════════════════════════════════════════════
 #
-# Реальный флоу подтверждён скриншотами пользователя (7777.md,
-# 17.07):
-#   1. Клик по коэффициенту -> внизу справа появляется СВЁРНУТЫЙ
-#      купон: "N Выбор / Итог. коэф: X" + стрелка-шеврон вверх.
-#      Поля суммы в свёрнутом виде НЕТ.
-#   2. Клик по шеврону -> купон разворачивается: заголовок "Ставка",
-#      вкладки "Ординарная/Экспресс/Система", инфо об исходе, поле
-#      ввода суммы с плейсхолдером "MDL", быстрые кнопки НАДБАВОК
-#      "+100 / +500 / +1000" (это ДОБАВКА к текущей сумме, а НЕ
-#      пресет ставки — под 5 лей их использовать нельзя), строка
-#      "Возможный выигрыш: 0.00 MDL", кнопка "Принять изменения".
-#   3. Сумму (5 лей) нужно вписать в поле вручную и нажать
-#      "Принять изменения".
-#
-# ⚠️ TODO-CALIBRATE: точные CSS-классы шеврона/поля/кнопки всё ещё
-# не подтверждены discover-дампом — ниже эвристика по тексту/атрибутам,
-# рабочая по скриншотам, но нужно сверить перед первым live-кликом.
+# КАЛИБРОВКА 17.07 (discover_20260717_142740, дамп с реально открытым
+# купоном на 5 лей-подобной ставке "Меньше 7.5"):
+#   • data-widget="betslip" В РЕАЛЬНОСТИ НЕ СУЩЕСТВУЕТ — старый селектор
+#     контейнера был ошибочным и НИКОГДА бы не сработал. Купон ищем
+#     теперь по классам конкретных элементов внутри него.
+#   • Поле суммы: <input class="... sp-selection-input ...">.
+#   • Заголовок-шапка купона: <div class="sp-bg-bgr-betslip-selection ...">
+#     с текстом "N Выбор / Итог. коэф: X" — по скриншотам именно клик
+#     по этой шапке разворачивает/сворачивает купон.
+#   • Кнопки +100/+500/+1000 — НАДБАВКИ к сумме, не пресеты, не трогаем.
+#   • Кнопка ставки: <button class="... sp-bg-btn-betslip-betbtn ...">
+#     с текстом "Сделать ставку" (disabled, пока сумма не введена).
+#     "Принять изменения" — отдельная кнопка, появляется, только если
+#     коэффициент успел измениться между выбором и подтверждением —
+#     проверяем оба варианта текста.
+
+BETSLIP_STAKE_INPUT_CLASS = "sp-selection-input"
+BETSLIP_HEADER_CLASS = "sp-bg-bgr-betslip-selection"
+BETSLIP_CONFIRM_CLASS_HINT = "betbtn"
+
 
 def _expand_betslip_if_collapsed(driver) -> bool:
     """
-    Разворачивает свёрнутый купон кликом по шеврону, если поле суммы
-    ещё не видно. Возвращает True, если купон в развёрнутом виде
-    (было изначально или удалось развернуть).
+    Разворачивает свёрнутый купон кликом по шапке ("N Выбор / Итог.
+    коэф: X"), если поле суммы ещё не видно. Возвращает True, если
+    купон в развёрнутом виде (было изначально или удалось развернуть).
     """
     try:
-        betslip = driver.find_element(By.XPATH, '//*[@data-widget="betslip"]')
-    except Exception:
-        return False
-
-    try:
-        if betslip.find_elements(By.XPATH, ".//input"):
+        if driver.find_elements(By.XPATH, f"//input[contains(@class,'{BETSLIP_STAKE_INPUT_CLASS}')]"):
             return True  # уже развёрнут
     except Exception:
         pass
 
     try:
-        toggles = betslip.find_elements(
-            By.XPATH,
-            ".//*[contains(@class,'chevron') or contains(@class,'arrow') "
-            "or contains(@class,'expand') or contains(@class,'collapse') "
-            "or contains(@class,'toggle') or self::svg or self::button "
-            "or @role='button']"
-        )
-        for t in toggles:
+        headers = driver.find_elements(By.XPATH, f"//*[contains(@class,'{BETSLIP_HEADER_CLASS}')]")
+        if not headers:
+            headers = driver.find_elements(By.XPATH, "//*[contains(.,'Итог. коэф')]")
+        for h in headers:
             try:
-                t.click()
+                h.click()
                 time.sleep(1)
-                if betslip.find_elements(By.XPATH, ".//input"):
-                    log("Купон развёрнут кликом по шеврону.")
+                if driver.find_elements(By.XPATH, f"//input[contains(@class,'{BETSLIP_STAKE_INPUT_CLASS}')]"):
+                    log("Купон развёрнут кликом по шапке.")
                     return True
             except Exception:
                 continue
     except Exception:
         pass
 
-    log("⚠️ Не удалось развернуть купон (шеврон не найден/не сработал).")
+    log("⚠️ Не удалось развернуть купон (шапка не найдена/не сработала).")
     return False
 
 
 def set_stake_and_confirm(driver, amount: float) -> Dict[str, Any]:
     """
-    ⚠️ TODO-CALIBRATE — сверить перед первым live-кликом (см. комментарий
-    выше). Разворачивает купон, находит поле суммы (плейсхолдер/подпись
-    "MDL" — НЕ кнопки +100/+500/+1000, это надбавки, а не пресеты),
-    вписывает сумму вручную и жмёт "Принять изменения".
+    Разворачивает купон, находит поле суммы (класс sp-selection-input —
+    НЕ кнопки +100/+500/+1000, это надбавки, а не пресеты), вписывает
+    сумму вручную и жмёт кнопку ставки.
 
     Возвращает {"status": "CONFIRMED"|"FAILED", "detail": str}
     """
-    try:
-        betslip = driver.find_element(By.XPATH, '//*[@data-widget="betslip"]')
-    except Exception as e:
-        return {"status": "FAILED", "detail": f"купон не найден: {e}"}
-
     if not _expand_betslip_if_collapsed(driver):
-        return {"status": "FAILED", "detail": "купон свёрнут, не смог развернуть (нужна калибровка шеврона)"}
+        return {"status": "FAILED", "detail": "купон свёрнут, не смог развернуть"}
 
     try:
-        inputs = betslip.find_elements(By.TAG_NAME, "input")
-        stake_input = None
-        # Сначала пробуем найти именно поле суммы по плейсхолдеру "MDL"
-        for inp in inputs:
-            placeholder = (inp.get_attribute("placeholder") or "").upper()
-            if "MDL" in placeholder:
-                stake_input = inp
-                break
-        # Фолбэк: любое текстовое/числовое поле (НЕ поля точного счёта
-        # "Точный счёт" — те лежат вне купона, так что здесь безопасно)
-        if stake_input is None:
-            for inp in inputs:
-                itype = (inp.get_attribute("type") or "").lower()
-                if itype in ("number", "text", ""):
-                    stake_input = inp
-                    break
-        if stake_input is None:
-            return {"status": "FAILED", "detail": "поле суммы (MDL) не найдено в развёрнутом купоне"}
-
+        stake_input = driver.find_element(
+            By.XPATH, f"//input[contains(@class,'{BETSLIP_STAKE_INPUT_CLASS}')]"
+        )
         stake_input.click()
         # .clear() часто не триггерит onChange у React-инпутов —
         # выделяем всё и удаляем через клавиатуру, потом вводим заново.
@@ -579,18 +621,26 @@ def set_stake_and_confirm(driver, amount: float) -> Dict[str, Any]:
         stake_input.send_keys(str(amount))
         time.sleep(0.5)
     except Exception as e:
-        return {"status": "FAILED", "detail": f"не смог ввести сумму: {e}"}
+        return {"status": "FAILED", "detail": f"поле суммы (sp-selection-input) не найдено/не ввёл: {e}"}
 
     try:
-        buttons = betslip.find_elements(By.XPATH, ".//button | .//*[@role='button']")
-        confirm_words = ["принять изменения", "подтвердить", "поставить",
-                          "confirm", "place bet", "apply", "ok"]
+        buttons = driver.find_elements(By.XPATH, ".//button")
+        confirm_words = ["сделать ставку", "принять изменения", "подтвердить",
+                          "поставить", "confirm", "place bet", "apply", "ok"]
         for btn in buttons:
             txt = (btn.text or "").strip().lower()
-            if any(w in txt for w in confirm_words):
+            cls = (btn.get_attribute("class") or "").lower()
+            if any(w in txt for w in confirm_words) or BETSLIP_CONFIRM_CLASS_HINT in cls:
+                disabled = btn.get_attribute("disabled") is not None
+                if disabled:
+                    log(f"Кнопка ставки '{txt}' есть, но пока DISABLED — жду и пробую снова через 1с.")
+                    time.sleep(1)
+                    disabled = btn.get_attribute("disabled") is not None
+                if disabled:
+                    return {"status": "FAILED", "detail": f"кнопка '{txt}' осталась disabled после ввода суммы"}
                 btn.click()
                 return {"status": "CONFIRMED", "detail": f"нажал кнопку '{txt}'"}
-        return {"status": "FAILED", "detail": "кнопка 'Принять изменения' не найдена"}
+        return {"status": "FAILED", "detail": "кнопка 'Сделать ставку' не найдена"}
     except Exception as e:
         return {"status": "FAILED", "detail": f"ошибка подтверждения: {e}"}
 
@@ -658,7 +708,9 @@ def place_bet_from_signal(bundle: Dict[str, Any]) -> Dict[str, Any]:
                 "stake": STAKE_AMOUNT, "odds": None}
 
     # FOUND_OPEN
-    odds = _extract_odds_from_text(outcome["odds_text"])
+    odds = outcome.get("odds")
+    if odds is None:
+        odds = _extract_odds_from_text(outcome["odds_text"])
 
     if AUTO_BET_DRY_RUN:
         log(f"🧪 DRY-RUN: нашёл открытый исход '{outcome['odds_text']}', НЕ кликаю.")
