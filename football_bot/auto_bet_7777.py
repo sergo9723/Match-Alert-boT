@@ -89,9 +89,16 @@ KEEPALIVE_INTERVAL_SEC = 45
 # ставку, чем поставить на другой матч с похожим названием.
 MIN_MATCH_MATCH_RATIO = 0.65
 
+# КАЛИБРОВКА 17.07: 30-минутный keepalive-тест вернул UNKNOWN на всех
+# 32 замерах подряд — не потому что разлогинило (было бы OUT), а
+# потому что старые слова-маркеры не совпадали с реальным текстом
+# сайта. На скриншотах пользователя реальная кнопка называется
+# "ПОПОЛНЕНИЕ" (не "пополнить" — другое окончание, как подстрока не
+# матчится) и валюта подписана "леев", а не "MDL" (тот код видно
+# только внутри поля суммы в открытом купоне, не в общей шапке).
 LOGGED_IN_MARKERS = [
-    "пополнить", "депозит", "вывод", "выход", "мой профиль",
-    "личный кабинет", "баланс", "mdl", "кабинет", "мои ставки",
+    "пополнить", "пополнение", "депозит", "вывод", "выход", "мой профиль",
+    "личный кабинет", "баланс", "леев", "mdl", "кабинет", "мои ставки",
 ]
 LOGGED_OUT_MARKERS = [
     "войти", "вход", "регистрация", "log in", "sign in", "авторизация",
@@ -179,14 +186,45 @@ def close_driver() -> None:
 # СОСТОЯНИЕ ЛОГИНА / KEEP-ALIVE
 # ═══════════════════════════════════════════════════════════════
 
-def detect_login_state(driver) -> str:
-    """'IN' | 'OUT' | 'UNKNOWN' по видимому тексту страницы.
-    ⚠️ TODO-CALIBRATE: эвристика по словам, не по надёжному DOM-маркеру
-    (например data-testid="user-balance") — уточнить после discover."""
+def _collect_all_frame_text(driver) -> str:
+    """
+    Собирает видимый текст со всей страницы, включая вложенные iframe
+    (если виджет ставок/шапка баланса рендерится в отдельном фрейме —
+    проверка только верхнего документа его не увидит и всегда даст
+    UNKNOWN, что и произошло в 30-минутном keepalive-тесте 17.07).
+    """
+    chunks: List[str] = []
     try:
-        text = driver.find_element(By.TAG_NAME, "body").text.lower()
+        chunks.append(driver.find_element(By.TAG_NAME, "body").text)
+    except Exception:
+        pass
+    try:
+        frames = driver.find_elements(By.TAG_NAME, "iframe")
+    except Exception:
+        frames = []
+    for fr in frames:
+        try:
+            driver.switch_to.frame(fr)
+            chunks.append(driver.find_element(By.TAG_NAME, "body").text)
+        except Exception:
+            pass
+        finally:
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+    return "\n".join(chunks).lower()
+
+
+def detect_login_state(driver) -> str:
+    """'IN' | 'OUT' | 'UNKNOWN' по видимому тексту страницы (основной
+    документ + вложенные iframe)."""
+    try:
+        text = _collect_all_frame_text(driver)
     except Exception as e:
         log(f"⚠️ Не смог прочитать страницу для проверки логина: {e}")
+        return "UNKNOWN"
+    if not text:
         return "UNKNOWN"
     out_hit = any(m in text for m in LOGGED_OUT_MARKERS)
     in_hit = any(m in text for m in LOGGED_IN_MARKERS)
