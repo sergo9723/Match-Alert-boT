@@ -276,6 +276,7 @@
 #   убери эти два ID из LEAGUE_IDS ниже, строка помечена.
 # ═══════════════════════════════════════════════════════════════
 
+import sys
 import time
 import json
 import os
@@ -285,6 +286,17 @@ import requests
 import random
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional, Tuple
+
+# BUG-FIX (Windows, 17.07): консоль Windows по умолчанию использует
+# cp1251/cp866, а не UTF-8 — print() с эмодзи (🚀, ✅ и т.д.) кидает
+# UnicodeEncodeError и валит весь процесс. На Linux эта проблема не
+# возникает (там консоль обычно уже UTF-8), но код общий для обеих ОС.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 try:
     from auto_bet_7777 import (
@@ -577,7 +589,14 @@ def safe_int(x, default: int = 0) -> int:
         return default
 
 def safe_log(msg: str) -> None:
-    print(f"[{now_str()}] {msg}", flush=True)
+    line = f"[{now_str()}] {msg}"
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:
+        # Второй рубеж защиты, если reconfigure(errors="replace") выше
+        # почему-то не сработал — не даём эмодзи/юникоду ронять процесс.
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        print(line.encode(enc, errors="replace").decode(enc, errors="replace"), flush=True)
 
 def parse_iso(s: str) -> datetime:
     dt = datetime.fromisoformat(s)
